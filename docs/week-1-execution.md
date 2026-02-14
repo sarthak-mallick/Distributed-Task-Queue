@@ -75,9 +75,9 @@ Update this table continuously during Week 1 execution.
 
 | ID | Status | Last Updated | Notes |
 |----|--------|--------------|-------|
-| W1-001 | Not Started | 2026-02-14 | - |
-| W1-002 | Not Started | 2026-02-14 | - |
-| W1-003 | Not Started | 2026-02-14 | - |
+| W1-001 | Completed | 2026-02-14 | Created Week 1 skeleton (`api`, `worker`, `ui`, `infra/compose`, `contracts`, `docs`) with starter README files. |
+| W1-002 | Completed | 2026-02-14 | Compose stack added for Kafka (KRaft), RabbitMQ, Redis, MongoDB with health checks/volumes; Kafka image corrected to `confluentinc/cp-kafka:7.6.1`. |
+| W1-003 | Completed | 2026-02-14 | Added smoke scripts (`bootstrap-and-smoke.sh`, `smoke-connectivity.sh`); full connectivity checks passed locally. |
 | W1-004 | Not Started | 2026-02-14 | - |
 | W1-005 | Not Started | 2026-02-14 | - |
 | W1-006 | Not Started | 2026-02-14 | - |
@@ -317,11 +317,14 @@ Correlation rule:
 ## Session Log (Append-Only)
 
 - 2026-02-14: Consolidated Week 1 planning + status into this single source-of-truth file.
+- 2026-02-14: Completed W1-001 by creating canonical Week 1 repo/service skeleton and starter docs.
+- 2026-02-14: Completed W1-002 by implementing Compose infra with health checks and persistent volumes; replaced unavailable Kafka image tag with a stable one.
+- 2026-02-14: Completed W1-003 by adding one-command bootstrap + protocol connectivity checks; user run succeeded with all services healthy.
 
 ## Handoff Snapshot
 
-- Week status: Not started
-- Completed tasks: None
+- Week status: In progress
+- Completed tasks: W1-001, W1-002, W1-003
 - In-progress tasks: None
 - Blockers: None
-- Next task: W1-001 repo/service skeleton
+- Next task: W1-004 define canonical Week 1 contracts under `contracts/`

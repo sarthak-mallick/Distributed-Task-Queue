@@ -1,0 +1,11 @@
+# Local env files (all services)
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+
+# Keep non-secret examples/templates versioned
+!**/.env.example
+!**/.env.template
+!**/*.env.example
+!**/*.env.template

@@ -1,92 +1,48 @@
 # AGENTS.md
 
-Repository coordination guide for Codex and other sub-agents.
+Repository-level policy for Codex and sub-agents.
 
-## Purpose
+## Default Behavior (Automatic)
 
-Use this file to define **how agents should work** in this repo.
-Use `docs/project-spec.md` to define **what to build** and **when**.
+For any thread in this repository, agents must apply these rules by default.
+You do not need to explicitly tell agents to use these files each time.
 
-## Source of Truth
+## Source of Truth Order
 
-1. `docs/project-spec.md` is the canonical product/architecture/timeline spec.
-2. `AGENTS.md` defines execution behavior, guardrails, and handoff rules.
-3. If they conflict on product scope/timeline, treat `docs/project-spec.md` as authoritative and update `AGENTS.md` accordingly.
+1. `docs/project-spec.md` for product scope, architecture, timeline, and acceptance criteria.
+2. `docs/week-N-execution.md` for the active week plan and live status.
+3. `docs/agent/workflow.md` for execution workflow and decision rules.
+4. `docs/agent/handoff-template.md` for handoff/report format.
+5. `AGENTS.md` for top-level policy.
 
-## Default Thread Policy (No Pasted Opener Needed)
+If there is any conflict:
+- Product/timeline conflict: `docs/project-spec.md` wins.
+- Week execution conflict: active `docs/week-N-execution.md` wins.
 
-For any thread started in this repository, agents should assume the following by default:
+## Mandatory Rules
 
-1. Follow this `AGENTS.md` workflow automatically.
-2. Use `docs/project-spec.md` as the canonical scope/timeline reference.
-3. Execute only the requested week/milestone scope from `docs/project-spec.md`.
-4. Validate and report against that week's acceptance criteria before closing.
+- Clarification before assumption:
+  Ask the user before making any assumption that could affect scope, architecture, timeline, cost, security, environment, or data contracts.
+- Scope discipline:
+  Execute only the requested week/milestone scope unless the user explicitly approves scope expansion.
+- Weekly status discipline:
+  Keep exactly one execution file per active week (`docs/week-1-execution.md`, `docs/week-2-execution.md`, etc.).
+  Update that file's live status sections before closing a thread.
+- Context hygiene discipline:
+  Follow `docs/agent/workflow.md` context-hygiene rules to minimize prompt bloat automatically.
+  Agents own this upkeep; user prompting is not required.
 
-Only override these defaults when the user explicitly requests a different scope or process.
+## Required Read Order for New Execution Threads
 
-## Required Read Order for New Threads
+1. `docs/project-spec.md`
+2. Active `docs/week-N-execution.md`
+3. `docs/agent/workflow.md`
+4. `docs/agent/handoff-template.md`
 
-1. Read `docs/project-spec.md`.
-2. Read this `AGENTS.md`.
-3. Read thread-specific task docs (if present), for example:
-   - `docs/week-1-execution.md`
-   - `docs/tickets/*.md`
-
-## Execution Status Storage (Minimal Files)
-
-To keep handoffs smooth without creating many files:
-
-1. Keep exactly one execution file per active week:
-   - `docs/week-1-execution.md`
-   - `docs/week-2-execution.md`
-   - `docs/week-3-execution.md`
-   - `docs/week-4-execution.md`
-2. Do not create separate weekly status files unless explicitly requested.
-3. Use each week's execution file as the live status/handoff artifact by updating:
-   - `Live Task Status` table
-   - `Session Log (append-only)`
-   - `Handoff Snapshot`
-4. At the end of each working session/thread, update the current week's execution file before closing.
-5. At week transition, create the next `docs/week-N-execution.md` and carry forward only unresolved risks/blockers.
-
-## Working Agreement
-
-- Keep high-level planning in a strategy thread.
-- Keep implementation details in execution threads.
-- Before coding, restate: scope, current week/milestone, and acceptance criteria.
-- Do not implement out-of-scope features unless explicitly approved.
-
-## Week-Based Execution Rules
-
-- Week 1: Local Docker Compose core flow (temporary REST allowed).
-- Week 2: GraphQL + gRPC + subscriptions migration.
-- Week 3: Azure provisioning/deployment + Jenkins CI/CD.
-- Week 4: Monitoring, hardening, and final docs.
-
-Always verify the current week goals against `docs/project-spec.md` before starting.
+Read in minimal mode defined by `docs/agent/workflow.md` (do not load unnecessary sections).
 
 ## Change Management
 
-- Any change to scope, architecture, or timeline must be recorded in:
-  - `docs/project-spec.md` change log section.
-- If execution process changes (workflow, conventions, handoff rules), update `AGENTS.md`.
-
-## Handoff Template (Use in PRs or Thread Updates)
-
-- Scope: (what milestone/week item was targeted)
-- Changes: (files/services touched)
-- Acceptance criteria status: (pass/fail per criterion)
-- Risks/issues: (blockers, tradeoffs, follow-ups)
-- Next step: (smallest actionable next task)
-
-## Practical Usage With docs/project-spec.md
-
-- Put decisions and milestones in `docs/project-spec.md`.
-- Put agent operating rules in `AGENTS.md`.
-- Linking both in new execution threads is optional, because default thread policy applies automatically.
-
-Optional short thread opener:
-
-```text
-Execute Week 1 from docs/week-1-execution.md.
-```
+- If product scope/timeline changes, update `docs/project-spec.md` change log.
+- If workflow/handoff behavior changes, update `docs/agent/workflow.md` and/or `docs/agent/handoff-template.md`.
+- Keep `AGENTS.md` short; only policy belongs here.

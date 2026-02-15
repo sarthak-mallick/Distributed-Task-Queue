@@ -1,6 +1,6 @@
 # Week 1 Execution Brief (Single Source of Truth)
 
-Last updated: 2026-02-14  
+Last updated: 2026-02-15  
 Canonical product/timeline reference: `docs/project-spec.md` (Week 1 section + acceptance criteria)
 
 This file is the only Week 1 execution and status artifact. It supersedes `docs/week1-execution-plan.md`.
@@ -331,6 +331,8 @@ Correlation rule:
 - 2026-02-14: Added explicit policy/workflow rule: execute one task ID at a time (no auto-batching all tasks for a day) unless user explicitly requests batching.
 - 2026-02-14: Updated `api/main.go` with function-level comments + logging coverage and added policy rule requiring comments/logging for new or modified functions.
 - 2026-02-14: Generalized remaining docs/readmes to job-type-first wording; kept weather as initial test profile example only.
+- 2026-02-14: Updated README Kafka verification command to use `--from-beginning` so manual checks can validate previously submitted messages without timing windows.
+- 2026-02-15: Closed Day 2 checkpoint after user-validated infra/API submit flow (`/healthz`, `POST /v1/jobs`, Redis status, Kafka read with `--from-beginning`); next implementation task remains `W1-008`.
 
 ## Handoff Snapshot
 
@@ -338,4 +340,5 @@ Correlation rule:
 - Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007
 - In-progress tasks: None
 - Blockers: None
+- Day checkpoint: Day 2 complete
 - Next task: W1-008 scaffold worker Kafka consumer group and handler wiring

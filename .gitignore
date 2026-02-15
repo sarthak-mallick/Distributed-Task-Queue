@@ -9,3 +9,6 @@
 !**/.env.template
 !**/*.env.example
 !**/*.env.template
+
+# Tooling caches
+.cache/

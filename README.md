@@ -79,9 +79,10 @@ docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env
 ```
 
 ### 7) Verify Kafka Message
-For this weather test profile, the topic is `jobs.weather.v1`.
+For this weather test profile, the topic is `jobs.weather.v1`.  
+`--from-beginning` ensures you can read an already-published message (no timing race with submit).
 ```bash
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic jobs.weather.v1 --max-messages 1 --timeout-ms 10000
+docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic jobs.weather.v1 --from-beginning --max-messages 1
 ```
 
 ### 8) Optional Infra Status Check

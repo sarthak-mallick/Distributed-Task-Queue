@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/rabbitmq/progress-check-reply-v1.schema.json",
+  "title": "ProgressCheckReplyV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "state", "progress_percent", "message", "timestamp"],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["queued", "running", "completed", "failed", "not_found"]
+    },
+    "progress_percent": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "message": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+

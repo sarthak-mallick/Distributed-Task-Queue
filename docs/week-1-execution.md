@@ -8,7 +8,7 @@ This file is the only Week 1 execution and status artifact. It supersedes `docs/
 ## Objective
 
 Deliver a fully working local end-to-end flow using Docker Compose:
-- Submit weather job
+- Submit job (weather profile used for initial testing)
 - Queue/process job
 - Track progress
 - Persist final result
@@ -29,7 +29,7 @@ Deliver a fully working local end-to-end flow using Docker Compose:
 
 - Docker Compose infra: Kafka (KRaft), RabbitMQ, Redis, MongoDB
 - Temporary Go REST API
-- Go worker consuming Kafka and running weather jobs
+- Go worker consuming Kafka and running jobs (weather profile first)
 - RabbitMQ request-reply progress path with correlation IDs
 - Basic React UI: submit + status/progress
 
@@ -58,14 +58,14 @@ Deliver a fully working local end-to-end flow using Docker Compose:
 | W1-003 | Inter-service connectivity smoke scripts (Kafka/RabbitMQ/Redis/Mongo reachability) | 3h | W1-002 | One-command smoke test passes from clean startup |
 | W1-004 | Define and commit canonical Week 1 contracts (Kafka, Redis, Mongo, RabbitMQ) | 4h | W1-001 | Contracts committed in `contracts/`; required fields match `project-spec.md` |
 | W1-005 | Scaffold Go API service (config, structured logging, `/healthz`) | 4h | W1-001, W1-002 | API boots with env config and returns 200 on `/healthz` |
-| W1-006 | Implement `POST /v1/jobs/weather`: validate payload, create IDs, publish Kafka job | 6h | W1-004, W1-005 | Returns 202 with `job_id`; Kafka message conforms to contract |
+| W1-006 | Implement `POST /v1/jobs` (generic submit): validate payload, create IDs, publish Kafka job | 6h | W1-004, W1-005 | Returns 202 with `job_id`; Kafka message conforms to contract |
 | W1-007 | Write initial Redis status on submit (`queued`, `0%`) | 3h | W1-004, W1-006 | Key `job:{job_id}:status` created with canonical fields and valid values |
-| W1-008 | Scaffold worker Kafka consumer group and weather job handler wiring | 5h | W1-002, W1-004 | Worker consumes jobs and defers offset commit until processing outcome |
-| W1-009 | Implement weather processing + normalized output + progress milestones | 6h | W1-008 | Progress transitions follow `0 -> 20 -> 50 -> 80 -> 100`; state updates visible in Redis |
+| W1-008 | Scaffold worker Kafka consumer group and job handler wiring (weather profile first) | 5h | W1-002, W1-004 | Worker consumes jobs and defers offset commit until processing outcome |
+| W1-009 | Implement initial processing (weather profile) + normalized output + progress milestones | 6h | W1-008 | Progress transitions follow `0 -> 20 -> 50 -> 80 -> 100`; state updates visible in Redis |
 | W1-010 | Persist final result to MongoDB (`job_results`) with idempotency guarantees | 5h | W1-004, W1-009 | Durable document stored once per `job_id`; replays do not duplicate incorrectly |
 | W1-011 | RabbitMQ progress request-reply with `correlation_id` + `reply_to` | 6h | W1-004, W1-007, W1-009 | Request/reply contracts match; correlation verified under concurrent requests |
 | W1-012 | Implement `GET /v1/jobs/{job_id}/status` backed by RabbitMQ flow | 4h | W1-011 | Correct status lookup, unknown-job handling, timeout handling |
-| W1-013 | Basic React UI for weather submit + job status/progress view | 6h | W1-006, W1-012 | User submits weather job and sees state/progress updates end-to-end |
+| W1-013 | Basic React UI for generic submit + job status/progress view (weather test profile) | 6h | W1-006, W1-012 | User submits a job (weather profile) and sees state/progress updates end-to-end |
 | W1-014 | Stability + failure paths: retry/backoff, structured logs, reconnect/restart behavior | 7h | W1-010, W1-011, W1-012 | Transient failures retried; logs include `job_id`/`trace_id`; restart scenarios pass |
 | W1-015 | Quickstart + test/demo checklist and final buffer for defect fixes | 4h | W1-013, W1-014 | Fresh-clone runbook validated; demo flow reproducible |
 
@@ -78,10 +78,10 @@ Update this table continuously during Week 1 execution.
 | W1-001 | Completed | 2026-02-14 | Created Week 1 skeleton (`api`, `worker`, `ui`, `infra/compose`, `contracts`, `docs`) with starter README files. |
 | W1-002 | Completed | 2026-02-14 | Compose stack added for Kafka (KRaft), RabbitMQ, Redis, MongoDB with health checks/volumes; Kafka image corrected to `confluentinc/cp-kafka:7.6.1`. |
 | W1-003 | Completed | 2026-02-14 | Added smoke scripts (`bootstrap-and-smoke.sh`, `smoke-connectivity.sh`); full connectivity checks passed locally. |
-| W1-004 | Not Started | 2026-02-14 | - |
-| W1-005 | Not Started | 2026-02-14 | - |
-| W1-006 | Not Started | 2026-02-14 | - |
-| W1-007 | Not Started | 2026-02-14 | - |
+| W1-004 | Completed | 2026-02-14 | Added canonical Week 1 contract schemas + examples under `contracts/kafka`, `contracts/redis`, `contracts/mongo`, and `contracts/rabbitmq`. |
+| W1-005 | Completed | 2026-02-14 | Scaffolded Go API with env config, structured logging, and dependency-aware `GET /healthz`. |
+| W1-006 | Completed | 2026-02-14 | Implemented `POST /v1/jobs` generic submit with payload validation, UUID IDs, and Kafka publish to per-job-type topics. |
+| W1-007 | Completed | 2026-02-14 | API now writes initial Redis status key `job:{job_id}:status` with `queued` + `progress_percent=0` and TTL before enqueue. |
 | W1-008 | Not Started | 2026-02-14 | - |
 | W1-009 | Not Started | 2026-02-14 | - |
 | W1-010 | Not Started | 2026-02-14 | - |
@@ -121,7 +121,7 @@ Update this table continuously during Week 1 execution.
 
 ### Day 5 - Basic UI
 - W1-013.
-- Submit and status view working end-to-end for weather jobs.
+- Submit and status view working end-to-end for generic jobs (weather profile tested first).
 
 ### Day 6 - Stability + Failure Paths
 - W1-014.
@@ -135,7 +135,7 @@ Update this table continuously during Week 1 execution.
 
 ### 1) Kafka Job Message
 
-Topic: `jobs.weather.v1`  
+Topic: `jobs.{job_type}.v1` (default from `KAFKA_TOPIC_TEMPLATE=jobs.%s.v1`)  
 Key: `job_id`
 
 Headers:
@@ -164,7 +164,7 @@ Required by canonical spec:
 
 Week 1 validation:
 - `job_id`, `trace_id`: UUID v4
-- `job_type`: `weather`
+- `job_type`: one of `weather|quote|exchange_rate|github_user`
 - `payload.units`: `metric|imperial`
 
 ### 2) Redis Status Schema
@@ -256,7 +256,7 @@ Reply body:
   "job_id": "6aab8fca-7059-40c4-97d4-53f55fd5bf67",
   "state": "running",
   "progress_percent": 50,
-  "message": "calling weather provider",
+  "message": "calling external provider",
   "timestamp": "2026-02-14T15:12:06Z"
 }
 ```
@@ -267,7 +267,7 @@ Correlation rule:
 
 ## Week 1 Acceptance Checklist
 
-- Weather job runs end-to-end from UI without manual data store edits.
+- Job flow runs end-to-end from UI without manual data store edits (validated with weather profile).
 - State transition correctness: `queued -> running -> completed/failed`.
 - Progress query returns accurate live state by `job_id`.
 - Redis has current state/progress; MongoDB has durable final result.
@@ -278,7 +278,7 @@ Correlation rule:
 - [ ] Fresh clone setup works with documented steps only.
 - [ ] `docker compose up -d` starts Kafka (KRaft), RabbitMQ, Redis, MongoDB healthy.
 - [ ] Connectivity smoke checks pass for all core services.
-- [ ] `POST /v1/jobs/weather` returns `202` with valid `job_id`.
+- [ ] `POST /v1/jobs` returns `202` with valid `job_id`.
 - [ ] Kafka message includes canonical required fields and valid payload.
 - [ ] Redis key `job:{job_id}:status` exists with canonical fields.
 - [ ] Worker applies progress milestones exactly: `0 -> 20 -> 50 -> 80 -> 100`.
@@ -290,14 +290,14 @@ Correlation rule:
 - [ ] Concurrent progress requests by `job_id` return correct responses.
 - [ ] API status endpoint handles unknown job and timeout paths safely.
 - [ ] UI submit + status flow works without manual Redis/Mongo intervention.
-- [ ] Worker retry/backoff handles transient weather API failures.
+- [ ] Worker retry/backoff handles transient provider API failures (weather profile validated first).
 - [ ] Service restart/reconnect behavior recovers and continues processing.
 
 ## Week 1 Demo Checklist
 
 - [ ] Start from clean environment (`docker compose down -v`, then up).
 - [ ] Show service health for Kafka, RabbitMQ, Redis, MongoDB.
-- [ ] Submit weather job from UI and capture returned `job_id`.
+- [ ] Submit one test job from UI (weather profile) and capture returned `job_id`.
 - [ ] Show Kafka message keyed by `job_id`.
 - [ ] Show Redis status key updates across milestones and states.
 - [ ] Show worker logs with `job_id` and `trace_id` correlation.
@@ -320,11 +320,22 @@ Correlation rule:
 - 2026-02-14: Completed W1-001 by creating canonical Week 1 repo/service skeleton and starter docs.
 - 2026-02-14: Completed W1-002 by implementing Compose infra with health checks and persistent volumes; replaced unavailable Kafka image tag with a stable one.
 - 2026-02-14: Completed W1-003 by adding one-command bootstrap + protocol connectivity checks; user run succeeded with all services healthy.
+- 2026-02-14: Completed W1-004 by adding contract schema/example files for Kafka, Redis, MongoDB, and RabbitMQ under `contracts/`.
+- 2026-02-14: Completed W1-005/W1-006/W1-007 by implementing Go API scaffold + generic `POST /v1/jobs` enqueue flow and initial Redis queued status writes.
+- 2026-02-14: Removed `POST /v1/jobs/weather` alias to keep a single generic submission path from project start.
+- 2026-02-14: Refactored submission path to be job-type extensible (`weather`, `quote`, `exchange_rate`, `github_user`) with topic template routing and per-type payload validators.
+- 2026-02-14: Local environment lacks Go toolchain (`go`/`gofmt` missing), so compile/test validation is pending on a machine with Go installed.
+- 2026-02-14: Added Day 2 API validation commands to `README.md` (compile/test/run + Redis/Kafka verification path).
+- 2026-02-14: Consolidated `README.md` into a single cumulative runbook (completed-through-Day-2) and removed day-split instructions.
+- 2026-02-14: Added explicit agent policy/workflow rule: README must always keep only current Day N cumulative setup/test instructions and remove Day (N-1) sections.
+- 2026-02-14: Added explicit policy/workflow rule: execute one task ID at a time (no auto-batching all tasks for a day) unless user explicitly requests batching.
+- 2026-02-14: Updated `api/main.go` with function-level comments + logging coverage and added policy rule requiring comments/logging for new or modified functions.
+- 2026-02-14: Generalized remaining docs/readmes to job-type-first wording; kept weather as initial test profile example only.
 
 ## Handoff Snapshot
 
 - Week status: In progress
-- Completed tasks: W1-001, W1-002, W1-003
+- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007
 - In-progress tasks: None
 - Blockers: None
-- Next task: W1-004 define canonical Week 1 contracts under `contracts/`
+- Next task: W1-008 scaffold worker Kafka consumer group and handler wiring

@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "job_id": "6aab8fca-7059-40c4-97d4-53f55fd5bf67",
+  "job_type": "weather",
+  "input": {
+    "city": "Austin",
+    "country_code": "US",
+    "units": "metric"
+  },
+  "output": {
+    "temperature": 20.4,
+    "condition": "Cloudy",
+    "humidity_pct": 61,
+    "wind_kph": 13.2
+  },
+  "final_state": "completed",
+  "started_at": "2026-02-14T15:12:05Z",
+  "completed_at": "2026-02-14T15:12:08Z",
+  "error": null,
+  "trace_id": "5be4d82b-9c6f-4372-81d2-c0dc5a95a7a3"
+}
+

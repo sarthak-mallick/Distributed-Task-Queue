@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/rabbitmq/progress-check-request-v1.schema.json",
+  "title": "ProgressCheckRequestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "request_id", "requested_at"],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+

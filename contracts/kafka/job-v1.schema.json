@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/kafka/job-v1.schema.json",
+  "title": "GenericJobV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_id",
+    "job_type",
+    "submitted_at",
+    "payload",
+    "trace_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "job_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "job_type": {
+      "type": "string",
+      "enum": ["weather", "quote", "exchange_rate", "github_user"]
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trace_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
+

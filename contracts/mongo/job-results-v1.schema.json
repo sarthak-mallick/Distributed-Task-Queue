@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "contracts/mongo/job-results-v1.schema.json",
+  "title": "JobResultsV1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "job_id",
+    "job_type",
+    "input",
+    "output",
+    "final_state",
+    "started_at",
+    "completed_at",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "job_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "job_type": {
+      "type": "string"
+    },
+    "input": {
+      "type": "object"
+    },
+    "output": {
+      "type": ["object", "null"]
+    },
+    "final_state": {
+      "type": "string",
+      "enum": ["completed", "failed"]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "error": {
+      "type": ["object", "null"]
+    },
+    "trace_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}
+

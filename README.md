@@ -2,7 +2,7 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor real-time progress.
 
-## Current Runbook (Completed Through Day 2)
+## Current Runbook (Completed Through Day 3)
 This runbook reflects the latest completed implementation slice and supersedes prior day-specific steps.
 
 Prerequisites:
@@ -29,25 +29,35 @@ This does all Day 1 foundation setup:
 - start Kafka (KRaft), RabbitMQ, Redis, MongoDB
 - run connectivity checks across all four services
 
-### 2) Build + Unit Test API
+### 2) Build + Unit Test Services
 ```bash
 cd api
 go mod tidy
 go test ./...
+
+cd ../worker
+go mod tidy
+go test ./...
 ```
 
-### 3) Run API Service
+### 3) Run API Service (Terminal 1)
 ```bash
 cd api
 go run .
 ```
 
-### 4) Validate API Health
+### 4) Run Worker Service (Terminal 2)
+```bash
+cd worker
+go run .
+```
+
+### 5) Validate API Health
 ```bash
 curl http://localhost:8080/healthz
 ```
 
-### 5) Submit Test Job (Weather Profile)
+### 6) Submit Test Job (Weather Profile)
 ```bash
 curl -s -X POST http://localhost:8080/v1/jobs \
   -H 'Content-Type: application/json' \
@@ -71,26 +81,41 @@ Supported `job_type` values in API submission:
 - `exchange_rate`
 - `github_user`
 
-### 6) Verify Redis Status + TTL
+### 7) Verify Redis Status Reaches Completed
 ```bash
 JOB_ID=<job_id_from_response>
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T redis redis-cli HGETALL job:${JOB_ID}:status
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T redis redis-cli TTL job:${JOB_ID}:status
 ```
 
-### 7) Verify Kafka Message
+Expected final Redis fields include:
+- `state` -> `completed`
+- `progress_percent` -> `100`
+
+### 8) Verify MongoDB Result Persistence
+```bash
+JOB_ID=<job_id_from_response>
+docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T mongo mongosh --quiet --eval "db.getSiblingDB('dtq').job_results.find({job_id:'${JOB_ID}'}).pretty()"
+```
+
+Expected:
+- one `job_results` document for the `job_id`
+- `final_state: \"completed\"`
+- normalized weather output fields in `output`
+
+### 9) Verify Kafka Message (Optional)
 For this weather test profile, the topic is `jobs.weather.v1`.  
 `--from-beginning` ensures you can read an already-published message (no timing race with submit).
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic jobs.weather.v1 --from-beginning --max-messages 1
 ```
 
-### 8) Optional Infra Status Check
+### 10) Optional Infra Status Check
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env ps
 ```
 
-### 9) Teardown
+### 11) Teardown
 Stop containers, keep persisted data:
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down

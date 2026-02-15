@@ -82,9 +82,9 @@ Update this table continuously during Week 1 execution.
 | W1-005 | Completed | 2026-02-14 | Scaffolded Go API with env config, structured logging, and dependency-aware `GET /healthz`. |
 | W1-006 | Completed | 2026-02-14 | Implemented `POST /v1/jobs` generic submit with payload validation, UUID IDs, and Kafka publish to per-job-type topics. |
 | W1-007 | Completed | 2026-02-14 | API now writes initial Redis status key `job:{job_id}:status` with `queued` + `progress_percent=0` and TTL before enqueue. |
-| W1-008 | Not Started | 2026-02-14 | - |
-| W1-009 | Not Started | 2026-02-14 | - |
-| W1-010 | Not Started | 2026-02-14 | - |
+| W1-008 | Completed | 2026-02-15 | Worker scaffold added with Kafka consumer-group loop, job-type handler wiring, and manual commit control (`FetchMessage` + `CommitMessages`) after processing outcome. |
+| W1-009 | Completed | 2026-02-15 | Worker now executes weather jobs with normalized output and Redis progress milestones (`running:20 -> running:50 -> running:80 -> completed:100`). |
+| W1-010 | Completed | 2026-02-15 | Worker persists final results to MongoDB `job_results` using idempotent upsert (`$setOnInsert`) and unique `job_id` index. |
 | W1-011 | Not Started | 2026-02-14 | - |
 | W1-012 | Not Started | 2026-02-14 | - |
 | W1-013 | Not Started | 2026-02-14 | - |
@@ -333,12 +333,17 @@ Correlation rule:
 - 2026-02-14: Generalized remaining docs/readmes to job-type-first wording; kept weather as initial test profile example only.
 - 2026-02-14: Updated README Kafka verification command to use `--from-beginning` so manual checks can validate previously submitted messages without timing windows.
 - 2026-02-15: Closed Day 2 checkpoint after user-validated infra/API submit flow (`/healthz`, `POST /v1/jobs`, Redis status, Kafka read with `--from-beginning`); next implementation task remains `W1-008`.
+- 2026-02-15: Completed W1-008 by implementing `worker` Kafka consumer-group scaffold with job-type handler registry (weather-first wiring), graceful shutdown loop, and deferred offset commits based on processing outcome.
+- 2026-02-15: Added worker unit tests for commit semantics (commit on success, skip commit on handler failure, commit dropped invalid messages); sandbox cannot fetch Go modules, so local execution is pending on developer machine.
+- 2026-02-15: Completed W1-009 by adding worker execution flow for weather jobs with provider abstraction (`openmeteo` + optional mock fallback), payload normalization, and Redis milestone updates (`20/50/80/100`).
+- 2026-02-15: Completed W1-010 by adding MongoDB final-result persistence (`job_results`) with unique `job_id` index and idempotent `Upsert` behavior to prevent duplicate durable records on replays.
+- 2026-02-15: Updated root `README.md` to Day-3 cumulative runbook (infra + API + worker + Redis/Mongo verification + teardown), replacing Day-2-only operational scope.
 
 ## Handoff Snapshot
 
 - Week status: In progress
-- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007
+- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010
 - In-progress tasks: None
 - Blockers: None
-- Day checkpoint: Day 2 complete
-- Next task: W1-008 scaffold worker Kafka consumer group and handler wiring
+- Day checkpoint: Day 3 complete
+- Next task: W1-011 implement RabbitMQ progress request-reply with correlation IDs

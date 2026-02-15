@@ -1,0 +1,9 @@
+{
+  "job_type": "weather",
+  "payload": {
+    "city": "Austin",
+    "country_code": "US",
+    "units": "metric"
+  }
+}
+

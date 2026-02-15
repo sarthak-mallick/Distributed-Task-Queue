@@ -1,0 +1,9 @@
+{
+  "job_id": "6aab8fca-7059-40c4-97d4-53f55fd5bf67",
+  "trace_id": "5be4d82b-9c6f-4372-81d2-c0dc5a95a7a3",
+  "state": "queued",
+  "progress_percent": 0,
+  "updated_at": "2026-02-14T15:12:04Z",
+  "message": "job queued"
+}
+

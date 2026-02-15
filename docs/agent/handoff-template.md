@@ -14,8 +14,8 @@ Next step: <single smallest actionable next task>
 
 ```text
 Scope: Week 1, W1-004 to W1-006
-Changes: Added Kafka contract schema; implemented POST /v1/jobs/weather in API
+Changes: Added Kafka contract schema; implemented POST /v1/jobs generic submit in API
 Acceptance criteria status: Partial - submission path working; end-to-end flow not yet complete
-Risks/issues: Weather provider key handling still pending final env strategy
+Risks/issues: External provider configuration handling still pending final env strategy
 Next step: Implement W1-007 initial Redis queued state write on submit
 ```

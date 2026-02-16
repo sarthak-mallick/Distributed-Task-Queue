@@ -75,6 +75,48 @@ func TestValidateSubmitJobRequest(t *testing.T) {
 	}
 }
 
+func TestParseJobStatusPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		path    string
+		wantID  string
+		wantErr bool
+	}{
+		{
+			name:    "valid",
+			path:    "/v1/jobs/6aab8fca-7059-40c4-97d4-53f55fd5bf67/status",
+			wantID:  "6aab8fca-7059-40c4-97d4-53f55fd5bf67",
+			wantErr: false,
+		},
+		{
+			name:    "missing status suffix",
+			path:    "/v1/jobs/6aab8fca-7059-40c4-97d4-53f55fd5bf67",
+			wantErr: true,
+		},
+		{
+			name:    "wrong prefix",
+			path:    "/v2/jobs/6aab8fca-7059-40c4-97d4-53f55fd5bf67/status",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, err := parseJobStatusPath(tt.path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseJobStatusPath() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && gotID != tt.wantID {
+				t.Fatalf("parseJobStatusPath() id = %s, want %s", gotID, tt.wantID)
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -83,4 +125,3 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
-

@@ -177,6 +177,57 @@ func TestProcessFetchedMessageCommitsInvalidEnvelope(t *testing.T) {
 	}
 }
 
+// TestDecodeProgressCheckRequest validates required request fields for RabbitMQ status checks.
+func TestDecodeProgressCheckRequest(t *testing.T) {
+	t.Parallel()
+
+	valid := mustJSON(t, map[string]any{
+		"job_id":       "6aab8fca-7059-40c4-97d4-53f55fd5bf67",
+		"request_id":   "f2ce7230-d853-4a5f-ab27-bf20a4f5e273",
+		"requested_at": "2026-02-15T08:00:00Z",
+	})
+	if _, err := decodeProgressCheckRequest(valid); err != nil {
+		t.Fatalf("decodeProgressCheckRequest(valid) error = %v", err)
+	}
+
+	invalid := mustJSON(t, map[string]any{
+		"job_id":       "",
+		"request_id":   "f2ce7230-d853-4a5f-ab27-bf20a4f5e273",
+		"requested_at": "2026-02-15T08:00:00Z",
+	})
+	if _, err := decodeProgressCheckRequest(invalid); err == nil {
+		t.Fatalf("decodeProgressCheckRequest(invalid) error = nil, want non-nil")
+	}
+}
+
+// TestParseProgressPercent verifies bounds-safe conversion from Redis values.
+func TestParseProgressPercent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw  string
+		want int
+	}{
+		{raw: "", want: 0},
+		{raw: "-5", want: 0},
+		{raw: "25", want: 25},
+		{raw: "100", want: 100},
+		{raw: "250", want: 100},
+		{raw: "not-int", want: 0},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.raw, func(t *testing.T) {
+			t.Parallel()
+			got := parseProgressPercent(tt.raw)
+			if got != tt.want {
+				t.Fatalf("parseProgressPercent(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 // testWriter routes logger output into test logs.
 type testWriter struct {
 	t *testing.T

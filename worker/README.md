@@ -2,7 +2,7 @@
 
 Go worker service for Week 1.
 
-Current implementation scope (`W1-008` to `W1-010`):
+Current implementation scope (worker-side `W1-008` to `W1-011`):
 - Consumes Kafka jobs using a consumer group
 - Routes messages by `job_type` (weather profile first, extensible handlers)
 - Uses manual offset commits (`FetchMessage` + `CommitMessages`)
@@ -14,9 +14,7 @@ Current implementation scope (`W1-008` to `W1-010`):
   - `running:20` -> `running:50` -> `running:80` -> `completed:100`
 - Processes weather jobs using provider abstraction (`openmeteo` or `mock`)
 - Persists final results idempotently in MongoDB `job_results` (unique `job_id`)
-
-Not implemented yet:
-- RabbitMQ request-reply (`W1-011`)
+- Handles RabbitMQ progress request-reply on `progress.check.request.v1` with AMQP `correlation_id` echo and `reply_to` routing
 
 ## Run Locally
 
@@ -48,6 +46,10 @@ go run .
 - `MONGO_DB` (default: `dtq`)
 - `MONGO_COLLECTION` (default: `job_results`)
 - `MONGO_CONNECT_TIMEOUT` (default: `10s`)
+- `RABBITMQ_URL` (default: `amqp://guest:guest@localhost:5672/`)
+- `RABBITMQ_PROGRESS_REQUEST_QUEUE` (default: `progress.check.request.v1`)
+- `RABBITMQ_PROGRESS_CONSUMER_TAG` (default: `dtq-worker-progress-v1`)
+- `RABBITMQ_PROGRESS_PREFETCH` (default: `20`)
 - `WEATHER_PROVIDER` (`openmeteo` or `mock`, default: `openmeteo`)
 - `WEATHER_HTTP_TIMEOUT` (default: `8s`)
 - `WEATHER_USE_MOCK_FALLBACK` (default: `true`)

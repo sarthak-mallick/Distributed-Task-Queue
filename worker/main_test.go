@@ -53,6 +53,29 @@ func (s noOpResultStore) UpsertJobResult(context.Context, jobResultDocument) (bo
 	return true, nil
 }
 
+// weatherFetchResult scripts fake weather client responses for retry tests.
+type weatherFetchResult struct {
+	obs weatherObservation
+	err error
+}
+
+// fakeWeatherClient is a scripted weather client test double.
+type fakeWeatherClient struct {
+	results []weatherFetchResult
+	calls   int
+}
+
+// Fetch returns scripted results to validate retry/backoff behavior.
+func (f *fakeWeatherClient) Fetch(context.Context, weatherPayload) (weatherObservation, error) {
+	if f.calls >= len(f.results) {
+		f.calls++
+		return weatherObservation{}, errors.New("no scripted weather result")
+	}
+	result := f.results[f.calls]
+	f.calls++
+	return result.obs, result.err
+}
+
 // TestProcessFetchedMessageCommitsAfterSuccessfulHandler verifies deferred commit ordering.
 func TestProcessFetchedMessageCommitsAfterSuccessfulHandler(t *testing.T) {
 	t.Parallel()
@@ -223,6 +246,110 @@ func TestParseProgressPercent(t *testing.T) {
 			got := parseProgressPercent(tt.raw)
 			if got != tt.want {
 				t.Fatalf("parseProgressPercent(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleWeatherJobRetriesTransientFailure verifies transient provider retry behavior.
+func TestHandleWeatherJobRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	weather := &fakeWeatherClient{
+		results: []weatherFetchResult{
+			{err: errors.New("weather provider returned status=503 body=\"temporarily unavailable\"")},
+			{obs: weatherObservation{Temperature: 20.4, Condition: "Cloudy", HumidityPct: 61, WindKPH: 13.2, Provider: "mock"}},
+		},
+	}
+	w := &worker{
+		cfg: config{
+			weatherMaxAttempts:    3,
+			weatherRetryInitialBO: 0,
+			weatherRetryMaxBO:     0,
+		},
+		logger:  log.New(testWriter{t: t}, "", 0),
+		weather: weather,
+	}
+
+	result, err := w.handleWeatherJob(context.Background(), kafkaJobMessage{
+		JobID:   "job-weather-retry",
+		TraceID: "trace-weather-retry",
+		Payload: mustJSON(t, map[string]any{
+			"city":         "Austin",
+			"country_code": "US",
+			"units":        "metric",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleWeatherJob() error = %v", err)
+	}
+	if weather.calls != 2 {
+		t.Fatalf("weather calls = %d, want 2", weather.calls)
+	}
+	if got := result.Output["provider"]; got != "mock" {
+		t.Fatalf("result provider = %v, want mock", got)
+	}
+}
+
+// TestHandleWeatherJobSkipsRetryForNonRetryableError verifies coordinate failures do not retry.
+func TestHandleWeatherJobSkipsRetryForNonRetryableError(t *testing.T) {
+	t.Parallel()
+
+	weather := &fakeWeatherClient{
+		results: []weatherFetchResult{
+			{err: errors.New("no coordinates found for city=Unknown country_code=")},
+		},
+	}
+	w := &worker{
+		cfg: config{
+			weatherMaxAttempts:    3,
+			weatherRetryInitialBO: 0,
+			weatherRetryMaxBO:     0,
+		},
+		logger:  log.New(testWriter{t: t}, "", 0),
+		weather: weather,
+	}
+
+	_, err := w.handleWeatherJob(context.Background(), kafkaJobMessage{
+		JobID:   "job-weather-no-retry",
+		TraceID: "trace-weather-no-retry",
+		Payload: mustJSON(t, map[string]any{
+			"city":  "Unknown",
+			"units": "metric",
+		}),
+	})
+	if err == nil {
+		t.Fatalf("handleWeatherJob() error = nil, want non-nil")
+	}
+	if weather.calls != 1 {
+		t.Fatalf("weather calls = %d, want 1", weather.calls)
+	}
+}
+
+// TestCalculateRetryBackoff verifies exponential backoff with max capping.
+func TestCalculateRetryBackoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		initial time.Duration
+		max     time.Duration
+		attempt int
+		want    time.Duration
+	}{
+		{name: "attempt one", initial: 500 * time.Millisecond, max: 4 * time.Second, attempt: 1, want: 500 * time.Millisecond},
+		{name: "attempt three", initial: 500 * time.Millisecond, max: 4 * time.Second, attempt: 3, want: 2 * time.Second},
+		{name: "max cap", initial: 500 * time.Millisecond, max: 1500 * time.Millisecond, attempt: 3, want: 1500 * time.Millisecond},
+		{name: "no initial", initial: 0, max: 4 * time.Second, attempt: 3, want: 0},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := calculateRetryBackoff(tt.initial, tt.max, tt.attempt)
+			if got != tt.want {
+				t.Fatalf("calculateRetryBackoff() = %s, want %s", got, tt.want)
 			}
 		})
 	}

@@ -2,7 +2,7 @@
 
 Go worker service for Week 1.
 
-Current implementation scope (worker-side `W1-008` to `W1-011`):
+Current implementation scope (worker-side `W1-008` to `W1-014`):
 - Consumes Kafka jobs using a consumer group
 - Routes messages by `job_type` (weather profile first, extensible handlers)
 - Uses manual offset commits (`FetchMessage` + `CommitMessages`)
@@ -15,6 +15,8 @@ Current implementation scope (worker-side `W1-008` to `W1-011`):
 - Processes weather jobs using provider abstraction (`openmeteo` or `mock`)
 - Persists final results idempotently in MongoDB `job_results` (unique `job_id`)
 - Handles RabbitMQ progress request-reply on `progress.check.request.v1` with AMQP `correlation_id` echo and `reply_to` routing
+- Retries transient weather-provider failures with configurable exponential backoff
+- Reconnects RabbitMQ progress responder sessions after channel/consume failures
 
 ## Run Locally
 
@@ -35,6 +37,7 @@ go run .
 - `WORKER_FETCH_MIN_BYTES` (default: `1`)
 - `WORKER_FETCH_MAX_BYTES` (default: `10485760`)
 - `WORKER_FETCH_MAX_WAIT` (default: `1s`)
+- `WORKER_FETCH_ERROR_BACKOFF` (default: `500ms`)
 - `WORKER_PROCESS_TIMEOUT` (default: `45s`)
 - `WORKER_COMMIT_TIMEOUT` (default: `5s`)
 - `REDIS_ADDR` (default: `localhost:6379`)
@@ -50,8 +53,12 @@ go run .
 - `RABBITMQ_PROGRESS_REQUEST_QUEUE` (default: `progress.check.request.v1`)
 - `RABBITMQ_PROGRESS_CONSUMER_TAG` (default: `dtq-worker-progress-v1`)
 - `RABBITMQ_PROGRESS_PREFETCH` (default: `20`)
+- `RABBITMQ_PROGRESS_RECONNECT_BACKOFF` (default: `2s`)
 - `WEATHER_PROVIDER` (`openmeteo` or `mock`, default: `openmeteo`)
 - `WEATHER_HTTP_TIMEOUT` (default: `8s`)
 - `WEATHER_USE_MOCK_FALLBACK` (default: `true`)
 - `WEATHER_GEOCODING_URL` (default Open-Meteo geocoding URL)
 - `WEATHER_FORECAST_URL` (default Open-Meteo forecast URL)
+- `WEATHER_MAX_ATTEMPTS` (default: `3`)
+- `WEATHER_RETRY_INITIAL_BACKOFF` (default: `500ms`)
+- `WEATHER_RETRY_MAX_BACKOFF` (default: `4s`)

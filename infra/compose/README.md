@@ -41,6 +41,11 @@ To run E2E and remove volumes at teardown:
 bash scripts/run-current-e2e.sh --purge
 ```
 
+For Day 5 UI manual testing, keep this stack running and then start:
+- API: `cd api && go run .`
+- Worker: `cd worker && go run .`
+- UI: `cd ui && npm install && npm run dev`
+
 ## Endpoints
 - Kafka external: `localhost:9094`
 - RabbitMQ AMQP: `localhost:5672`

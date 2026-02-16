@@ -59,6 +59,13 @@ type app struct {
 	rabbitConn  *amqp.Connection
 }
 
+const (
+	// corsAllowMethods lists HTTP methods accepted by the Week 1 API surface.
+	corsAllowMethods = "GET,POST,OPTIONS"
+	// corsAllowHeaders lists request headers accepted by the Week 1 API surface.
+	corsAllowHeaders = "Content-Type,Accept"
+)
+
 // submitJobRequest is the generic public job-submission request.
 type submitJobRequest struct {
 	JobType string          `json:"job_type"`
@@ -287,7 +294,34 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/v1/jobs", a.handleSubmitJob)
 	mux.HandleFunc("/v1/jobs/", a.handleJobStatus)
-	return mux
+	return a.withCORS(mux)
+}
+
+// withCORS applies browser CORS headers and handles preflight requests.
+func (a *app) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		applyCORSHeaders(w, r)
+		if r.Method == http.MethodOptions {
+			a.logger.Printf("cors preflight handled method=%s path=%s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// applyCORSHeaders writes Access-Control headers for UI-to-API browser requests.
+func applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
+	w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
+	w.Header().Set("Access-Control-Allow-Headers", corsAllowHeaders)
+	w.Header().Set("Access-Control-Max-Age", "600")
 }
 
 // handleHealthz reports API dependency health (Kafka + Redis + RabbitMQ).

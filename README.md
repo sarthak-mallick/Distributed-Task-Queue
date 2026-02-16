@@ -2,51 +2,65 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor real-time progress.
 
-## Current Runbook (Completed Through Day 4)
+## Current Runbook (Completed Through Day 5)
 This runbook reflects the latest completed implementation slice and supersedes prior day-specific steps.
 
 Prerequisites:
 - Docker Desktop (or Docker daemon) running
 - Go toolchain installed (Go 1.22+)
+- Node.js + npm installed (Node 20+ recommended)
 
-### 1) Run Full Current Validation (Recommended)
+### 1) Start Infra + Verify Connectivity
+```bash
+bash infra/compose/scripts/bootstrap-and-smoke.sh
+```
+
+### 2) Run API (Terminal 1)
+```bash
+cd api
+go run .
+```
+
+### 3) Run Worker (Terminal 2)
+```bash
+cd worker
+go run .
+```
+
+### 4) Run UI (Terminal 3)
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`.
+
+### 5) Validate Through UI
+
+1. Submit a `weather` job from the UI.
+2. Confirm submit response returns `job_id` and accepted state.
+3. Confirm status tracker progresses to `completed` with `100%`.
+4. Optionally paste any `job_id` into status tracker and check/poll manually.
+
+### 6) Optional Backend Automation Check
+Use this to re-run backend end-to-end validation from one command:
 ```bash
 bash scripts/run-current-e2e.sh
 ```
 
-What this command does:
-- creates `infra/compose/.env` from `.env.example` if missing
-- starts Kafka (KRaft), RabbitMQ, Redis, MongoDB
-- runs connectivity smoke checks
-- runs `go test ./...` for `api` and `worker`
-- starts API + worker with isolated Kafka topic and RabbitMQ queue for this run
-- submits a weather-profile job and waits for `completed` + `100%`
-- validates RabbitMQ status flow, Redis final status, Mongo persistence, Kafka message
-- tears everything down automatically by default
+Optional flags:
+- keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
+- skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
+- include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
+- teardown with volume cleanup: `bash scripts/run-current-e2e.sh --purge`
 
-### 2) Keep Infra Running After Test (Optional)
-```bash
-bash scripts/run-current-e2e.sh --keep-infra
-```
-
-### 3) Skip Unit Tests During E2E (Optional)
-```bash
-bash scripts/run-current-e2e.sh --skip-unit-tests
-```
-
-### 4) Purge Volumes After Test (Optional)
-```bash
-bash scripts/run-current-e2e.sh --purge
-```
-
-Use this when you want a fully clean local reset after the run (includes volume cleanup such as MongoDB data volume).
-
-### 5) Manual Teardown (Only Needed With `--keep-infra`)
+### 7) Teardown
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down
 ```
 
-To also remove persisted data volumes:
+To remove persisted data volumes too:
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down -v
 ```

@@ -4,10 +4,9 @@ Operational workflow for implementation threads in this repository.
 
 ## 1) Thread Start Checklist
 
-1. Read `docs/project-spec.md`.
-2. Read active `docs/week-N-execution.md`.
-3. Confirm scope: current week, tasks, and acceptance criteria.
-4. If any critical detail is unclear, ask clarification questions before implementation.
+1. Follow the source-of-truth read order in `AGENTS.md`.
+2. Confirm scope: current week, tasks, and acceptance criteria.
+3. If any critical detail is unclear, ask clarification questions before implementation.
 
 Use minimal-read mode for `docs/week-N-execution.md`:
 1. `Objective`
@@ -92,3 +91,11 @@ Maintain `README.md` as the operational runbook for the latest completed impleme
 2. When Day N is implemented, remove or replace Day (N-1) sections and labels.
 3. Do not keep parallel day-specific runbooks in `README.md` (for example, separate Day 1 and Day 2 blocks).
 4. Ensure teardown instructions remain present in the current cumulative runbook.
+
+## 9) Current E2E Runner Maintenance Rule
+
+Maintain `scripts/run-current-e2e.sh` as the single canonical executable validation flow for the latest completed implementation day:
+
+1. Keep it aligned with current Day N behavior and checks.
+2. When Day N advances, update this script to the new cumulative flow and remove/replace Day (N-1)-specific logic from the canonical path.
+3. Keep README commands aligned to `scripts/run-current-e2e.sh`.

@@ -12,3 +12,4 @@
 
 # Tooling caches
 .cache/
+.tmp/

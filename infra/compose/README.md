@@ -25,6 +25,16 @@ bash infra/compose/scripts/smoke-connectivity.sh
 bash infra/compose/scripts/bootstrap-and-smoke.sh
 ```
 
+## Full Current E2E Validation (Recommended)
+
+From repository root:
+
+```bash
+bash scripts/run-current-e2e.sh
+```
+
+This runs infra + API + worker + end-to-end checks and tears down by default.
+
 ## Endpoints
 - Kafka external: `localhost:9094`
 - RabbitMQ AMQP: `localhost:5672`

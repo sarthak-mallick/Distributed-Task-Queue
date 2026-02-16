@@ -12,10 +12,12 @@ ENV_FILE="${COMPOSE_DIR}/.env"
 ENV_EXAMPLE="${COMPOSE_DIR}/.env.example"
 API_DIR="${ROOT_DIR}/api"
 WORKER_DIR="${ROOT_DIR}/worker"
+UI_DIR="${ROOT_DIR}/ui"
 
 KEEP_INFRA=false
 SKIP_UNIT_TESTS=false
 PURGE_VOLUMES=false
+WITH_UI_CHECKS=false
 
 # log prints all script status lines with a stable prefix.
 log() {
@@ -30,15 +32,17 @@ Usage: bash scripts/run-current-e2e.sh [options]
 Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
+  --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
   1) Starts compose infrastructure and smoke-checks it.
-  2) Runs api/worker unit tests (unless skipped).
-  3) Starts API and worker with isolated topic/queue settings.
-  4) Submits a weather-profile job and validates status/Redis/Mongo/Kafka.
-  5) Tears down app processes and infra by default.
+  2) Optionally runs frontend build checks (`--with-ui-checks`).
+  3) Runs api/worker unit tests (unless skipped).
+  4) Starts API and worker with isolated topic/queue settings.
+  5) Submits a weather-profile job and validates status/Redis/Mongo/Kafka.
+  6) Tears down app processes and infra by default.
 EOF
 }
 
@@ -50,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-unit-tests)
       SKIP_UNIT_TESTS=true
+      shift
+      ;;
+    --with-ui-checks)
+      WITH_UI_CHECKS=true
       shift
       ;;
     --purge)
@@ -94,6 +102,58 @@ API_PID=""
 WORKER_PID=""
 
 COMPOSE_CMD=(docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}")
+
+# require_command verifies one CLI dependency exists on PATH.
+require_command() {
+  local cmd="$1"
+  if ! command -v "${cmd}" >/dev/null 2>&1; then
+    log "missing required command: ${cmd}"
+    exit 1
+  fi
+}
+
+# preflight_checks validates local tooling and daemon readiness before test start.
+preflight_checks() {
+  require_command docker
+  require_command go
+  require_command curl
+  if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
+    require_command npm
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    log "docker daemon is not reachable; start Docker Desktop and retry"
+    exit 1
+  fi
+}
+
+# run_ui_checks validates the React UI build path as part of e2e validation.
+run_ui_checks() {
+  if [[ ! -d "${UI_DIR}" ]]; then
+    log "ui directory not found at ${UI_DIR}"
+    exit 1
+  fi
+
+  if [[ -f "${UI_DIR}/package-lock.json" ]]; then
+    log "running ui dependency install with npm ci"
+    (
+      cd "${UI_DIR}"
+      npm ci
+    )
+  else
+    log "running ui dependency install with npm install"
+    (
+      cd "${UI_DIR}"
+      npm install
+    )
+  fi
+
+  log "running ui production build"
+  (
+    cd "${UI_DIR}"
+    npm run build
+  )
+}
 
 # stop_process terminates one background process if still running.
 stop_process() {
@@ -173,6 +233,14 @@ wait_for_status_path() {
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${ENV_EXAMPLE}" "${ENV_FILE}"
   log "created ${ENV_FILE} from .env.example"
+fi
+
+preflight_checks
+
+if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
+  run_ui_checks
+else
+  log "skipping ui checks (use --with-ui-checks to enable)"
 fi
 
 log "starting docker compose infrastructure"

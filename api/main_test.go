@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -124,4 +126,24 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal failed: %v", err)
 	}
 	return b
+}
+
+func TestApplyCORSHeaders_WithOrigin(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	rec := httptest.NewRecorder()
+
+	applyCORSHeaders(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("allow-origin = %q, want %q", got, "http://localhost:5173")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != corsAllowMethods {
+		t.Fatalf("allow-methods = %q, want %q", got, corsAllowMethods)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != corsAllowHeaders {
+		t.Fatalf("allow-headers = %q, want %q", got, corsAllowHeaders)
+	}
 }

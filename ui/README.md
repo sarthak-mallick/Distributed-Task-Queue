@@ -15,6 +15,12 @@ npm run dev
 
 Open `http://localhost:5173`.
 
+For one-command backend + frontend validation from repo root:
+
+```bash
+bash scripts/run-current-e2e.sh --with-ui-checks
+```
+
 ## Manual Validation Path
 
 1. Start backend dependencies and services from repo root:

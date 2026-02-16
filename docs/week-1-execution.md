@@ -346,6 +346,9 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-16: Added `--purge` option to `scripts/run-current-e2e.sh` to support automatic `docker compose down -v` teardown for local volume cleanup.
 - 2026-02-16: Completed W1-013 by implementing a Vite + React UI in `ui/` for generic job submission, response display, manual/auto status polling, and progress rendering.
 - 2026-02-16: Updated runbooks (`README.md`, `ui/README.md`, `infra/compose/README.md`) to completed-through-Day-5 instructions including UI startup and validation flow.
+- 2026-02-16: Added preflight checks to `scripts/run-current-e2e.sh` for required commands and Docker daemon readiness to fail fast with actionable errors.
+- 2026-02-16: Executed Day-5 validation: backend `scripts/run-current-e2e.sh --purge` passed end-to-end; UI dependency install and `npm run build` passed; UI dev server responded `HTTP 200` on `http://localhost:5173/`.
+- 2026-02-16: Enhanced `scripts/run-current-e2e.sh` with `--with-ui-checks` to include frontend dependency install (`npm ci`/`npm install`) and `npm run build` in one-command validation.
 - 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot

@@ -52,6 +52,7 @@ bash scripts/run-current-e2e.sh
 Optional flags:
 - keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
 - skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
+- include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
 - teardown with volume cleanup: `bash scripts/run-current-e2e.sh --purge`
 
 ### 7) Teardown

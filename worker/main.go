@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 	"go.mongodb.org/mongo-driver/bson"
@@ -52,6 +53,11 @@ type config struct {
 	mongoDatabase   string
 	mongoCollection string
 	mongoConnTO     time.Duration
+
+	rabbitURL                string
+	progressRequestQueue     string
+	progressConsumerTag      string
+	progressConsumerPrefetch int
 
 	weatherProvider        string
 	weatherHTTPTimeout     time.Duration
@@ -89,6 +95,8 @@ type worker struct {
 	consumer    kafkaConsumer
 	redisClient *redis.Client
 	mongoClient *mongo.Client
+	rabbitConn  *amqp.Connection
+	rabbitChan  *amqp.Channel
 	statusStore statusStore
 	resultStore resultStore
 	weather     weatherClient
@@ -113,6 +121,22 @@ type kafkaJobMessage struct {
 	SubmittedAt   string          `json:"submitted_at"`
 	TraceID       string          `json:"trace_id"`
 	Payload       json.RawMessage `json:"payload"`
+}
+
+// progressCheckRequest models RabbitMQ status request messages.
+type progressCheckRequest struct {
+	JobID       string `json:"job_id"`
+	RequestID   string `json:"request_id"`
+	RequestedAt string `json:"requested_at"`
+}
+
+// progressCheckReply models RabbitMQ status reply messages.
+type progressCheckReply struct {
+	JobID           string `json:"job_id"`
+	State           string `json:"state"`
+	ProgressPercent int    `json:"progress_percent"`
+	Message         string `json:"message"`
+	Timestamp       string `json:"timestamp"`
 }
 
 // weatherPayload is the weather profile payload shape used first in Week 1.
@@ -266,6 +290,11 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	progressConsumerPrefetch, err := parseIntEnv("RABBITMQ_PROGRESS_PREFETCH", 20)
+	if err != nil {
+		return config{}, err
+	}
+
 	weatherMockFallback, err := parseBoolEnv("WEATHER_USE_MOCK_FALLBACK", true)
 	if err != nil {
 		return config{}, err
@@ -299,6 +328,11 @@ func loadConfig() (config, error) {
 		mongoCollection: envOrDefault("MONGO_COLLECTION", "job_results"),
 		mongoConnTO:     mongoConnTimeout,
 
+		rabbitURL:                envOrDefault("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+		progressRequestQueue:     envOrDefault("RABBITMQ_PROGRESS_REQUEST_QUEUE", "progress.check.request.v1"),
+		progressConsumerTag:      envOrDefault("RABBITMQ_PROGRESS_CONSUMER_TAG", "dtq-worker-progress-v1"),
+		progressConsumerPrefetch: progressConsumerPrefetch,
+
 		weatherProvider:        strings.ToLower(envOrDefault("WEATHER_PROVIDER", "openmeteo")),
 		weatherHTTPTimeout:     weatherHTTPTimeout,
 		weatherGeocodingURL:    envOrDefault("WEATHER_GEOCODING_URL", "https://geocoding-api.open-meteo.com/v1/search"),
@@ -308,7 +342,7 @@ func loadConfig() (config, error) {
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s weather_provider=%s",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s weather_provider=%s",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -318,6 +352,7 @@ func loadConfig() (config, error) {
 		cfg.mongoURI,
 		cfg.mongoDatabase,
 		cfg.mongoCollection,
+		cfg.progressRequestQueue,
 		cfg.weatherProvider,
 	)
 	return cfg, nil
@@ -378,8 +413,45 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		return nil, fmt.Errorf("mongo index ensure failed: %w", err)
 	}
 
+	rabbitConn, err := amqp.Dial(cfg.rabbitURL)
+	if err != nil {
+		_ = reader.Close()
+		_ = redisClient.Close()
+		_ = mongoClient.Disconnect(context.Background())
+		return nil, fmt.Errorf("rabbitmq connect failed: %w", err)
+	}
+
+	rabbitChan, err := rabbitConn.Channel()
+	if err != nil {
+		_ = rabbitConn.Close()
+		_ = reader.Close()
+		_ = redisClient.Close()
+		_ = mongoClient.Disconnect(context.Background())
+		return nil, fmt.Errorf("rabbitmq channel open failed: %w", err)
+	}
+
+	if err := rabbitChan.Qos(cfg.progressConsumerPrefetch, 0, false); err != nil {
+		_ = rabbitChan.Close()
+		_ = rabbitConn.Close()
+		_ = reader.Close()
+		_ = redisClient.Close()
+		_ = mongoClient.Disconnect(context.Background())
+		return nil, fmt.Errorf("rabbitmq qos setup failed: %w", err)
+	}
+
+	if _, err := rabbitChan.QueueDeclare(cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
+		_ = rabbitChan.Close()
+		_ = rabbitConn.Close()
+		_ = reader.Close()
+		_ = redisClient.Close()
+		_ = mongoClient.Disconnect(context.Background())
+		return nil, fmt.Errorf("rabbitmq request queue declare failed: %w", err)
+	}
+
 	weatherClient, err := newWeatherClient(cfg, logger)
 	if err != nil {
+		_ = rabbitChan.Close()
+		_ = rabbitConn.Close()
 		_ = reader.Close()
 		_ = redisClient.Close()
 		_ = mongoClient.Disconnect(context.Background())
@@ -392,6 +464,8 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		consumer:    reader,
 		redisClient: redisClient,
 		mongoClient: mongoClient,
+		rabbitConn:  rabbitConn,
+		rabbitChan:  rabbitChan,
 		statusStore: &redisHashStatusStore{client: redisClient, ttl: cfg.statusTTL, logger: logger},
 		resultStore: resultStore,
 		weather:     weatherClient,
@@ -404,13 +478,28 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		"github_user":   w.handleGenericJob,
 	}
 
-	logger.Printf("worker initialized topics=%v group_id=%s", cfg.kafkaTopics, cfg.kafkaGroupID)
+	logger.Printf(
+		"worker initialized topics=%v group_id=%s progress_request_queue=%s",
+		cfg.kafkaTopics,
+		cfg.kafkaGroupID,
+		cfg.progressRequestQueue,
+	)
 	return w, nil
 }
 
 // close releases Kafka, Redis, and MongoDB resources during shutdown.
 func (w *worker) close() {
 	w.logger.Println("closing worker dependencies")
+	if w.rabbitChan != nil {
+		if err := w.rabbitChan.Close(); err != nil {
+			w.logger.Printf("rabbit channel close failed: %v", err)
+		}
+	}
+	if w.rabbitConn != nil {
+		if err := w.rabbitConn.Close(); err != nil {
+			w.logger.Printf("rabbit connection close failed: %v", err)
+		}
+	}
 	if err := w.consumer.Close(); err != nil {
 		w.logger.Printf("kafka consumer close failed: %v", err)
 	}
@@ -428,12 +517,29 @@ func (w *worker) close() {
 
 // run starts the long-running fetch/process loop until context cancellation.
 func (w *worker) run(ctx context.Context) error {
-	w.logger.Printf("worker loop starting topics=%v group_id=%s", w.cfg.kafkaTopics, w.cfg.kafkaGroupID)
+	w.logger.Printf(
+		"worker loops starting topics=%v group_id=%s progress_request_queue=%s",
+		w.cfg.kafkaTopics,
+		w.cfg.kafkaGroupID,
+		w.cfg.progressRequestQueue,
+	)
+
+	go func() {
+		if err := w.runProgressResponder(ctx); err != nil && ctx.Err() == nil {
+			w.logger.Printf("progress responder stopped with error: %v", err)
+		}
+	}()
+
+	return w.runKafkaLoop(ctx)
+}
+
+// runKafkaLoop consumes Kafka messages until cancellation and applies job handlers.
+func (w *worker) runKafkaLoop(ctx context.Context) error {
 	for {
 		msg, err := w.consumer.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-				w.logger.Println("worker loop stopping due to cancellation")
+				w.logger.Println("kafka consumer loop stopping due to cancellation")
 				return nil
 			}
 			w.logger.Printf("kafka fetch failed: %v", err)
@@ -451,6 +557,182 @@ func (w *worker) run(ctx context.Context) error {
 			)
 		}
 	}
+}
+
+// runProgressResponder serves RabbitMQ progress check requests until cancellation.
+func (w *worker) runProgressResponder(ctx context.Context) error {
+	if w.rabbitChan == nil {
+		return errors.New("rabbitmq channel is not configured")
+	}
+
+	deliveries, err := w.rabbitChan.Consume(
+		w.cfg.progressRequestQueue,
+		w.cfg.progressConsumerTag,
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("rabbitmq consume setup failed: %w", err)
+	}
+
+	w.logger.Printf("progress responder consuming queue=%s", w.cfg.progressRequestQueue)
+	for {
+		select {
+		case <-ctx.Done():
+			if err := w.rabbitChan.Cancel(w.cfg.progressConsumerTag, false); err != nil {
+				w.logger.Printf("progress responder cancel failed: %v", err)
+			}
+			w.logger.Println("progress responder stopping due to cancellation")
+			return nil
+		case d, ok := <-deliveries:
+			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return errors.New("rabbitmq deliveries channel closed unexpectedly")
+			}
+
+			ack, requeue := w.handleProgressDelivery(ctx, d)
+			if ack {
+				if err := d.Ack(false); err != nil {
+					w.logger.Printf("progress request ack failed delivery_tag=%d err=%v", d.DeliveryTag, err)
+				}
+				continue
+			}
+
+			if err := d.Nack(false, requeue); err != nil {
+				w.logger.Printf("progress request nack failed delivery_tag=%d requeue=%t err=%v", d.DeliveryTag, requeue, err)
+			}
+		}
+	}
+}
+
+// handleProgressDelivery validates one status request and publishes the correlated reply.
+func (w *worker) handleProgressDelivery(ctx context.Context, d amqp.Delivery) (ack bool, requeue bool) {
+	correlationID := strings.TrimSpace(d.CorrelationId)
+	replyTo := strings.TrimSpace(d.ReplyTo)
+	if correlationID == "" || replyTo == "" {
+		w.logger.Printf(
+			"dropping invalid progress request missing correlation_id/reply_to delivery_tag=%d correlation_id=%q reply_to=%q",
+			d.DeliveryTag,
+			correlationID,
+			replyTo,
+		)
+		return true, false
+	}
+
+	req, err := decodeProgressCheckRequest(d.Body)
+	if err != nil {
+		w.logger.Printf("dropping invalid progress request body correlation_id=%s err=%v", correlationID, err)
+		return true, false
+	}
+
+	if req.RequestID != "" && req.RequestID != correlationID {
+		w.logger.Printf(
+			"progress request correlation mismatch request_id=%s correlation_id=%s job_id=%s",
+			req.RequestID,
+			correlationID,
+			req.JobID,
+		)
+	}
+
+	requestCtx, cancel := context.WithTimeout(ctx, w.cfg.commitTimeout)
+	defer cancel()
+
+	reply, err := w.buildProgressReply(requestCtx, req.JobID)
+	if err != nil {
+		w.logger.Printf("progress reply build failed correlation_id=%s job_id=%s err=%v", correlationID, req.JobID, err)
+		return false, true
+	}
+
+	body, err := json.Marshal(reply)
+	if err != nil {
+		w.logger.Printf("progress reply marshal failed correlation_id=%s job_id=%s err=%v", correlationID, req.JobID, err)
+		return true, false
+	}
+
+	if err := w.rabbitChan.PublishWithContext(
+		requestCtx,
+		"",
+		replyTo,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType:   "application/json",
+			CorrelationId: correlationID,
+			ReplyTo:       replyTo,
+			Body:          body,
+			Timestamp:     time.Now().UTC(),
+		},
+	); err != nil {
+		w.logger.Printf("progress reply publish failed correlation_id=%s job_id=%s err=%v", correlationID, req.JobID, err)
+		return false, true
+	}
+
+	w.logger.Printf(
+		"progress reply published correlation_id=%s job_id=%s state=%s progress=%d",
+		correlationID,
+		reply.JobID,
+		reply.State,
+		reply.ProgressPercent,
+	)
+	return true, false
+}
+
+// buildProgressReply loads latest Redis status and projects the canonical reply envelope.
+func (w *worker) buildProgressReply(ctx context.Context, jobID string) (progressCheckReply, error) {
+	status, found, err := w.readJobStatus(ctx, jobID)
+	if err != nil {
+		return progressCheckReply{}, err
+	}
+
+	if !found {
+		return progressCheckReply{
+			JobID:           jobID,
+			State:           "not_found",
+			ProgressPercent: 0,
+			Message:         "job not found",
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		}, nil
+	}
+
+	state := strings.ToLower(strings.TrimSpace(status["state"]))
+	if state == "" {
+		state = "not_found"
+	}
+	progress := parseProgressPercent(status["progress_percent"])
+	message := strings.TrimSpace(status["message"])
+	if message == "" {
+		message = "status available"
+	}
+
+	return progressCheckReply{
+		JobID:           jobID,
+		State:           state,
+		ProgressPercent: progress,
+		Message:         message,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// readJobStatus fetches the canonical Redis hash for a job status key.
+func (w *worker) readJobStatus(ctx context.Context, jobID string) (map[string]string, bool, error) {
+	if w.redisClient == nil {
+		return nil, false, errors.New("redis client is not configured")
+	}
+	key := jobStatusKey(jobID)
+
+	values, err := w.redisClient.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, false, err
+	}
+	if len(values) == 0 {
+		return nil, false, nil
+	}
+	return values, true, nil
 }
 
 // processFetchedMessage validates, routes, tracks progress, persists results, and commits offsets.
@@ -897,6 +1179,32 @@ func weatherCodeToCondition(code int) string {
 	}
 }
 
+// decodeProgressCheckRequest validates and parses a RabbitMQ status request body.
+func decodeProgressCheckRequest(raw []byte) (progressCheckRequest, error) {
+	var req progressCheckRequest
+	if err := decodeJSONObject(raw, &req); err != nil {
+		return progressCheckRequest{}, err
+	}
+
+	req.JobID = strings.TrimSpace(req.JobID)
+	req.RequestID = strings.TrimSpace(req.RequestID)
+	req.RequestedAt = strings.TrimSpace(req.RequestedAt)
+
+	if req.JobID == "" {
+		return progressCheckRequest{}, errors.New("job_id is required")
+	}
+	if req.RequestID == "" {
+		return progressCheckRequest{}, errors.New("request_id is required")
+	}
+	if req.RequestedAt == "" {
+		return progressCheckRequest{}, errors.New("requested_at is required")
+	}
+	if _, err := time.Parse(time.RFC3339, req.RequestedAt); err != nil {
+		return progressCheckRequest{}, fmt.Errorf("requested_at must be RFC3339: %w", err)
+	}
+	return req, nil
+}
+
 // decodeKafkaJobMessage validates and parses the canonical Kafka envelope.
 func decodeKafkaJobMessage(raw []byte) (kafkaJobMessage, error) {
 	if len(raw) == 0 {
@@ -942,6 +1250,7 @@ func decodeKafkaJobMessage(raw []byte) (kafkaJobMessage, error) {
 // decodeJSONObject decodes one JSON value and rejects trailing tokens.
 func decodeJSONObject(raw []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
@@ -1005,6 +1314,26 @@ func resolveKafkaTopics(jobTypes []string, overrideTopic, topicTemplate string) 
 		}
 	}
 	return topics
+}
+
+// parseProgressPercent converts status progress values to bounded integer percentages.
+func parseProgressPercent(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
 }
 
 // progressMessageForJobType returns a status message for the 50% processing milestone.

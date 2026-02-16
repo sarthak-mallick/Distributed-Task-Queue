@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.7.0
 	github.com/segmentio/kafka-go v0.4.47
+	github.com/rabbitmq/amqp091-go v1.10.0
 )
 
 require (

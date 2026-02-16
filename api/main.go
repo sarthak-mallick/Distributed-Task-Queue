@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
@@ -25,18 +26,28 @@ import (
 // appLogger is the process-wide logger used for startup and helper-function logs.
 var appLogger = log.New(os.Stdout, "api ", log.LstdFlags|log.LUTC)
 
+var (
+	// errStatusRequestTimeout indicates no RabbitMQ status reply arrived before timeout.
+	errStatusRequestTimeout = errors.New("status request timed out")
+	// errStatusNotFound indicates the worker reported no status for the requested job.
+	errStatusNotFound = errors.New("job not found")
+)
+
 // config contains runtime settings loaded from environment variables.
 type config struct {
-	listenAddr         string
-	kafkaBrokers       []string
-	kafkaTopic         string
-	kafkaTopicTemplate string
-	redisAddr          string
-	redisUsername      string
-	redisPassword      string
-	redisDB            int
-	statusTTL          time.Duration
-	requestTimeout     time.Duration
+	listenAddr           string
+	kafkaBrokers         []string
+	kafkaTopic           string
+	kafkaTopicTemplate   string
+	redisAddr            string
+	redisUsername        string
+	redisPassword        string
+	redisDB              int
+	statusTTL            time.Duration
+	requestTimeout       time.Duration
+	rabbitURL            string
+	progressRequestQueue string
+	progressReplyTimeout time.Duration
 }
 
 // app bundles service dependencies and configuration.
@@ -45,6 +56,7 @@ type app struct {
 	logger      *log.Logger
 	kafkaWriter *kafka.Writer
 	redisClient *redis.Client
+	rabbitConn  *amqp.Connection
 }
 
 // submitJobRequest is the generic public job-submission request.
@@ -85,6 +97,22 @@ type kafkaJobMessage struct {
 	Payload       json.RawMessage `json:"payload"`
 }
 
+// progressCheckRequest is the canonical RabbitMQ progress request payload.
+type progressCheckRequest struct {
+	JobID       string `json:"job_id"`
+	RequestID   string `json:"request_id"`
+	RequestedAt string `json:"requested_at"`
+}
+
+// progressCheckReply is the canonical RabbitMQ progress reply payload.
+type progressCheckReply struct {
+	JobID           string `json:"job_id"`
+	State           string `json:"state"`
+	ProgressPercent int    `json:"progress_percent"`
+	Message         string `json:"message"`
+	Timestamp       string `json:"timestamp"`
+}
+
 // payloadValidator validates and normalizes a job payload.
 type payloadValidator func(json.RawMessage) (json.RawMessage, error)
 
@@ -103,7 +131,10 @@ func main() {
 		appLogger.Fatalf("config load failed: %v", err)
 	}
 
-	a := newApp(cfg, appLogger)
+	a, err := newApp(cfg, appLogger)
+	if err != nil {
+		appLogger.Fatalf("app init failed: %v", err)
+	}
 	defer a.close()
 
 	srv := &http.Server{
@@ -149,21 +180,29 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	progressReplyTimeout, err := parseDurationEnv("PROGRESS_REPLY_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
-		listenAddr:         envOrDefault("API_ADDR", ":8080"),
-		kafkaBrokers:       parseCSVEnv("KAFKA_BROKERS", []string{"localhost:9094"}),
-		kafkaTopic:         strings.TrimSpace(os.Getenv("KAFKA_TOPIC")),
-		kafkaTopicTemplate: envOrDefault("KAFKA_TOPIC_TEMPLATE", "jobs.%s.v1"),
-		redisAddr:          envOrDefault("REDIS_ADDR", "localhost:6379"),
-		redisUsername:      os.Getenv("REDIS_USERNAME"),
-		redisPassword:      os.Getenv("REDIS_PASSWORD"),
-		redisDB:            redisDB,
-		statusTTL:          statusTTL,
-		requestTimeout:     requestTimeout,
+		listenAddr:           envOrDefault("API_ADDR", ":8080"),
+		kafkaBrokers:         parseCSVEnv("KAFKA_BROKERS", []string{"localhost:9094"}),
+		kafkaTopic:           strings.TrimSpace(os.Getenv("KAFKA_TOPIC")),
+		kafkaTopicTemplate:   envOrDefault("KAFKA_TOPIC_TEMPLATE", "jobs.%s.v1"),
+		redisAddr:            envOrDefault("REDIS_ADDR", "localhost:6379"),
+		redisUsername:        os.Getenv("REDIS_USERNAME"),
+		redisPassword:        os.Getenv("REDIS_PASSWORD"),
+		redisDB:              redisDB,
+		statusTTL:            statusTTL,
+		requestTimeout:       requestTimeout,
+		rabbitURL:            envOrDefault("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+		progressRequestQueue: envOrDefault("RABBITMQ_PROGRESS_REQUEST_QUEUE", "progress.check.request.v1"),
+		progressReplyTimeout: progressReplyTimeout,
 	}
 
 	appLogger.Printf(
-		"config loaded addr=%s kafka_brokers=%v kafka_topic=%q kafka_topic_template=%q redis_addr=%s redis_db=%d status_ttl=%s request_timeout=%s",
+		"config loaded addr=%s kafka_brokers=%v kafka_topic=%q kafka_topic_template=%q redis_addr=%s redis_db=%d status_ttl=%s request_timeout=%s progress_request_queue=%s progress_reply_timeout=%s",
 		cfg.listenAddr,
 		cfg.kafkaBrokers,
 		cfg.kafkaTopic,
@@ -172,13 +211,37 @@ func loadConfig() (config, error) {
 		cfg.redisDB,
 		cfg.statusTTL,
 		cfg.requestTimeout,
+		cfg.progressRequestQueue,
+		cfg.progressReplyTimeout,
 	)
 	return cfg, nil
 }
 
 // newApp initializes all dependency clients.
-func newApp(cfg config, logger *log.Logger) *app {
+func newApp(cfg config, logger *log.Logger) (*app, error) {
 	logger.Println("initializing application dependencies")
+
+	rabbitConn, err := amqp.Dial(cfg.rabbitURL)
+	if err != nil {
+		return nil, fmt.Errorf("rabbitmq connect failed: %w", err)
+	}
+
+	rabbitChan, err := rabbitConn.Channel()
+	if err != nil {
+		_ = rabbitConn.Close()
+		return nil, fmt.Errorf("rabbitmq channel open failed: %w", err)
+	}
+
+	if _, err := rabbitChan.QueueDeclare(cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
+		_ = rabbitChan.Close()
+		_ = rabbitConn.Close()
+		return nil, fmt.Errorf("rabbitmq request queue declare failed: %w", err)
+	}
+
+	if err := rabbitChan.Close(); err != nil {
+		logger.Printf("rabbitmq setup channel close failed: %v", err)
+	}
+
 	return &app{
 		cfg:    cfg,
 		logger: logger,
@@ -197,7 +260,8 @@ func newApp(cfg config, logger *log.Logger) *app {
 			Password: cfg.redisPassword,
 			DB:       cfg.redisDB,
 		}),
-	}
+		rabbitConn: rabbitConn,
+	}, nil
 }
 
 // close closes network clients during shutdown.
@@ -209,18 +273,24 @@ func (a *app) close() {
 	if err := a.redisClient.Close(); err != nil {
 		a.logger.Printf("redis close failed: %v", err)
 	}
+	if a.rabbitConn != nil {
+		if err := a.rabbitConn.Close(); err != nil {
+			a.logger.Printf("rabbitmq connection close failed: %v", err)
+		}
+	}
 }
 
 // routes registers HTTP endpoints.
 func (a *app) routes() http.Handler {
-	a.logger.Println("registering routes: GET /healthz, POST /v1/jobs")
+	a.logger.Println("registering routes: GET /healthz, POST /v1/jobs, GET /v1/jobs/{job_id}/status")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/v1/jobs", a.handleSubmitJob)
+	mux.HandleFunc("/v1/jobs/", a.handleJobStatus)
 	return mux
 }
 
-// handleHealthz reports API dependency health (Kafka + Redis).
+// handleHealthz reports API dependency health (Kafka + Redis + RabbitMQ).
 func (a *app) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	a.logger.Printf("healthz request method=%s", r.Method)
 	if r.Method != http.MethodGet {
@@ -250,19 +320,28 @@ func (a *app) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		break
 	}
 
+	rabbitOK := false
+	if ch, err := a.rabbitConn.Channel(); err != nil {
+		a.logger.Printf("healthz rabbit channel open failed: %v", err)
+	} else {
+		rabbitOK = true
+		_ = ch.Close()
+	}
+
 	statusCode := http.StatusOK
 	overall := "ok"
-	if !kafkaOK || !redisOK {
+	if !kafkaOK || !redisOK || !rabbitOK {
 		statusCode = http.StatusServiceUnavailable
 		overall = "degraded"
 	}
 
-	a.logger.Printf("healthz result status=%s kafka_ok=%t redis_ok=%t", overall, kafkaOK, redisOK)
+	a.logger.Printf("healthz result status=%s kafka_ok=%t redis_ok=%t rabbit_ok=%t", overall, kafkaOK, redisOK, rabbitOK)
 	writeJSON(w, statusCode, map[string]any{
 		"status": overall,
 		"checks": map[string]bool{
-			"kafka": kafkaOK,
-			"redis": redisOK,
+			"kafka":    kafkaOK,
+			"redis":    redisOK,
+			"rabbitmq": rabbitOK,
 		},
 		"time": time.Now().UTC().Format(time.RFC3339),
 	})
@@ -308,6 +387,149 @@ func (a *app) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		Message:     "job accepted",
 	})
 	a.logger.Printf("submit job accepted job_id=%s trace_id=%s job_type=%s", jobID, traceID, req.JobType)
+}
+
+// handleJobStatus fetches latest job state through RabbitMQ request-reply.
+func (a *app) handleJobStatus(w http.ResponseWriter, r *http.Request) {
+	a.logger.Printf("status request method=%s path=%s", r.Method, r.URL.Path)
+	if r.Method != http.MethodGet {
+		a.logger.Printf("status request rejected method=%s", r.Method)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+
+	jobID, err := parseJobStatusPath(r.URL.Path)
+	if err != nil {
+		a.logger.Printf("status request invalid path=%s err=%v", r.URL.Path, err)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid status path"})
+		return
+	}
+	if _, err := uuid.Parse(jobID); err != nil {
+		a.logger.Printf("status request invalid job_id=%s err=%v", jobID, err)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "job_id must be a valid UUID"})
+		return
+	}
+
+	reply, err := a.requestJobStatus(r.Context(), jobID)
+	if err != nil {
+		switch {
+		case errors.Is(err, errStatusNotFound):
+			a.logger.Printf("status request job not found job_id=%s", jobID)
+			writeJSON(w, http.StatusNotFound, reply)
+		case errors.Is(err, errStatusRequestTimeout):
+			a.logger.Printf("status request timeout job_id=%s", jobID)
+			writeJSON(w, http.StatusGatewayTimeout, errorResponse{Error: "status request timed out"})
+		default:
+			a.logger.Printf("status request failed job_id=%s err=%v", jobID, err)
+			writeJSON(w, http.StatusBadGateway, errorResponse{Error: "failed to fetch job status"})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, reply)
+	a.logger.Printf("status request success job_id=%s state=%s progress=%d", reply.JobID, reply.State, reply.ProgressPercent)
+}
+
+// requestJobStatus sends a correlated RabbitMQ request and waits for the status reply.
+func (a *app) requestJobStatus(parentCtx context.Context, jobID string) (progressCheckReply, error) {
+	requestID := uuid.NewString()
+	requestedAt := time.Now().UTC()
+
+	body, err := json.Marshal(progressCheckRequest{
+		JobID:       jobID,
+		RequestID:   requestID,
+		RequestedAt: requestedAt.Format(time.RFC3339),
+	})
+	if err != nil {
+		return progressCheckReply{}, fmt.Errorf("request payload encode failed: %w", err)
+	}
+
+	ch, err := a.rabbitConn.Channel()
+	if err != nil {
+		return progressCheckReply{}, fmt.Errorf("rabbitmq channel open failed: %w", err)
+	}
+	defer func() {
+		if closeErr := ch.Close(); closeErr != nil {
+			a.logger.Printf("status request channel close failed: %v", closeErr)
+		}
+	}()
+
+	if _, err := ch.QueueDeclare(a.cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
+		return progressCheckReply{}, fmt.Errorf("request queue declare failed: %w", err)
+	}
+
+	replyQueue, err := ch.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		return progressCheckReply{}, fmt.Errorf("reply queue declare failed: %w", err)
+	}
+
+	deliveries, err := ch.Consume(replyQueue.Name, "", true, true, false, false, nil)
+	if err != nil {
+		return progressCheckReply{}, fmt.Errorf("reply consumer setup failed: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, a.cfg.progressReplyTimeout)
+	defer cancel()
+
+	if err := ch.PublishWithContext(
+		ctx,
+		"",
+		a.cfg.progressRequestQueue,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType:   "application/json",
+			CorrelationId: requestID,
+			ReplyTo:       replyQueue.Name,
+			Body:          body,
+			Timestamp:     requestedAt,
+		},
+	); err != nil {
+		return progressCheckReply{}, fmt.Errorf("status request publish failed: %w", err)
+	}
+
+	a.logger.Printf("status request published job_id=%s request_id=%s", jobID, requestID)
+	for {
+		select {
+		case <-ctx.Done():
+			return progressCheckReply{}, errStatusRequestTimeout
+		case d, ok := <-deliveries:
+			if !ok {
+				return progressCheckReply{}, errors.New("reply consumer closed")
+			}
+			if strings.TrimSpace(d.CorrelationId) != requestID {
+				a.logger.Printf("ignoring mismatched correlation reply expected=%s got=%s", requestID, d.CorrelationId)
+				continue
+			}
+
+			var reply progressCheckReply
+			if err := decodeJSONBytes(d.Body, &reply); err != nil {
+				return progressCheckReply{}, fmt.Errorf("invalid status reply payload: %w", err)
+			}
+			if strings.TrimSpace(reply.Timestamp) == "" {
+				reply.Timestamp = time.Now().UTC().Format(time.RFC3339)
+			}
+			if reply.State == "not_found" {
+				return reply, errStatusNotFound
+			}
+			return reply, nil
+		}
+	}
+}
+
+// parseJobStatusPath extracts the {job_id} segment from /v1/jobs/{job_id}/status.
+func parseJobStatusPath(path string) (string, error) {
+	const prefix = "/v1/jobs/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", errors.New("missing /v1/jobs prefix")
+	}
+
+	remainder := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(remainder, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "status" {
+		return "", errors.New("path must match /v1/jobs/{job_id}/status")
+	}
+	return strings.TrimSpace(parts[0]), nil
 }
 
 // enqueueJob writes initial Redis status and publishes the canonical Kafka message.
@@ -448,6 +670,19 @@ func decodeJSON(r *http.Request, dst any) error {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		appLogger.Printf("decodeJSON multiple values detected")
 		return errors.New("invalid request body: multiple JSON values")
+	}
+	return nil
+}
+
+// decodeJSONBytes decodes strict single-object JSON bytes.
+func decodeJSONBytes(raw []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("multiple JSON values")
 	}
 	return nil
 }

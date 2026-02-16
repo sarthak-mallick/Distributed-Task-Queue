@@ -1,6 +1,6 @@
 # Week 1 Execution Brief (Single Source of Truth)
 
-Last updated: 2026-02-15  
+Last updated: 2026-02-16  
 Canonical product/timeline reference: `docs/project-spec.md` (Week 1 section + acceptance criteria)
 
 This file is the only Week 1 execution and status artifact. It supersedes `docs/week1-execution-plan.md`.
@@ -85,8 +85,8 @@ Update this table continuously during Week 1 execution.
 | W1-008 | Completed | 2026-02-15 | Worker scaffold added with Kafka consumer-group loop, job-type handler wiring, and manual commit control (`FetchMessage` + `CommitMessages`) after processing outcome. |
 | W1-009 | Completed | 2026-02-15 | Worker now executes weather jobs with normalized output and Redis progress milestones (`running:20 -> running:50 -> running:80 -> completed:100`). |
 | W1-010 | Completed | 2026-02-15 | Worker persists final results to MongoDB `job_results` using idempotent upsert (`$setOnInsert`) and unique `job_id` index. |
-| W1-011 | Not Started | 2026-02-14 | - |
-| W1-012 | Not Started | 2026-02-14 | - |
+| W1-011 | Completed | 2026-02-16 | Worker now serves RabbitMQ progress request-reply on `progress.check.request.v1`, requiring `correlation_id` + `reply_to` and echoing correlation on replies. |
+| W1-012 | Completed | 2026-02-16 | API now exposes `GET /v1/jobs/{job_id}/status` backed by RabbitMQ request-reply with timeout + unknown-job handling. |
 | W1-013 | Not Started | 2026-02-14 | - |
 | W1-014 | Not Started | 2026-02-14 | - |
 | W1-015 | Not Started | 2026-02-14 | - |
@@ -338,12 +338,16 @@ Correlation rule:
 - 2026-02-15: Completed W1-009 by adding worker execution flow for weather jobs with provider abstraction (`openmeteo` + optional mock fallback), payload normalization, and Redis milestone updates (`20/50/80/100`).
 - 2026-02-15: Completed W1-010 by adding MongoDB final-result persistence (`job_results`) with unique `job_id` index and idempotent `Upsert` behavior to prevent duplicate durable records on replays.
 - 2026-02-15: Updated root `README.md` to Day-3 cumulative runbook (infra + API + worker + Redis/Mongo verification + teardown), replacing Day-2-only operational scope.
+- 2026-02-16: Completed W1-011 by adding worker RabbitMQ progress responder with strict request validation, Redis-backed status lookup, and AMQP correlation/reply semantics.
+- 2026-02-16: Completed W1-012 by implementing API `GET /v1/jobs/{job_id}/status` over RabbitMQ request-reply with UUID path validation, timeout handling, and `not_found` mapping.
+- 2026-02-16: Updated root README/API/worker docs to Day-4 cumulative runbook and environment variables for RabbitMQ progress flow.
+- 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot
 
 - Week status: In progress
-- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010
+- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010, W1-011, W1-012
 - In-progress tasks: None
 - Blockers: None
-- Day checkpoint: Day 3 complete
-- Next task: W1-011 implement RabbitMQ progress request-reply with correlation IDs
+- Day checkpoint: Day 4 complete
+- Next task: W1-013 implement basic React UI submit + status view

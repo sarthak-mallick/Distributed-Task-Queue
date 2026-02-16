@@ -2,9 +2,10 @@
 
 Temporary Go REST API for Week 1.
 
-Implemented Day 2 endpoints:
+Implemented Day 4 endpoints:
 - `POST /v1/jobs` (generic)
 - `GET /healthz`
+- `GET /v1/jobs/{job_id}/status` (RabbitMQ request-reply backed)
 
 ## Run
 
@@ -25,6 +26,9 @@ go run .
 - `REDIS_DB` (default `0`)
 - `STATUS_TTL` (default `24h`)
 - `REQUEST_TIMEOUT` (default `5s`)
+- `RABBITMQ_URL` (default `amqp://guest:guest@localhost:5672/`)
+- `RABBITMQ_PROGRESS_REQUEST_QUEUE` (default `progress.check.request.v1`)
+- `PROGRESS_REPLY_TIMEOUT` (default `5s`)
 
 ## Generic Submit Example
 
@@ -46,3 +50,9 @@ Currently supported `job_type` values:
 - `quote`
 - `exchange_rate`
 - `github_user`
+
+## Status Example
+
+```bash
+curl -s http://localhost:8080/v1/jobs/<job_id>/status | jq
+```

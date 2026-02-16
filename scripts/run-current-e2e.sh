@@ -15,6 +15,7 @@ WORKER_DIR="${ROOT_DIR}/worker"
 
 KEEP_INFRA=false
 SKIP_UNIT_TESTS=false
+PURGE_VOLUMES=false
 
 # log prints all script status lines with a stable prefix.
 log() {
@@ -29,6 +30,7 @@ Usage: bash scripts/run-current-e2e.sh [options]
 Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
+  --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_UNIT_TESTS=true
       shift
       ;;
+    --purge)
+      PURGE_VOLUMES=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -61,6 +67,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${KEEP_INFRA}" == "true" && "${PURGE_VOLUMES}" == "true" ]]; then
+  log "invalid option combination: --keep-infra and --purge cannot be used together"
+  exit 1
+fi
 
 RUN_ID="$(date -u +%Y%m%d%H%M%S)"
 TOPIC="jobs.weather.e2e.${RUN_ID}"
@@ -104,8 +115,13 @@ cleanup() {
   stop_process "${WORKER_PID}" "worker"
 
   if [[ "${KEEP_INFRA}" == "false" ]]; then
-    log "tearing down docker compose services"
-    "${COMPOSE_CMD[@]}" down >/dev/null 2>&1 || true
+    if [[ "${PURGE_VOLUMES}" == "true" ]]; then
+      log "tearing down docker compose services and volumes (--purge)"
+      "${COMPOSE_CMD[@]}" down -v >/dev/null 2>&1 || true
+    else
+      log "tearing down docker compose services"
+      "${COMPOSE_CMD[@]}" down >/dev/null 2>&1 || true
+    fi
   else
     log "keeping docker compose services running (--keep-infra)"
   fi

@@ -34,7 +34,14 @@ bash scripts/run-current-e2e.sh --keep-infra
 bash scripts/run-current-e2e.sh --skip-unit-tests
 ```
 
-### 4) Manual Teardown (Only Needed With `--keep-infra`)
+### 4) Purge Volumes After Test (Optional)
+```bash
+bash scripts/run-current-e2e.sh --purge
+```
+
+Use this when you want a fully clean local reset after the run (includes volume cleanup such as MongoDB data volume).
+
+### 5) Manual Teardown (Only Needed With `--keep-infra`)
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down
 ```

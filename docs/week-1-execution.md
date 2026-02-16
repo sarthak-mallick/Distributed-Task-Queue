@@ -343,6 +343,7 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-16: Added workflow policy to keep `scripts/run-current-e2e.sh` updated as Day N advances and keep README aligned to that single canonical command.
 - 2026-02-16: Validated `scripts/run-current-e2e.sh` end-to-end locally (submit -> RabbitMQ status -> Redis completed -> Mongo persisted -> Kafka consumed) with automatic teardown.
 - 2026-02-16: De-duplicated instruction docs by keeping detailed execution rules in `docs/agent/workflow.md` and replacing repeated reporting-format bullets in this file with a pointer to `docs/agent/handoff-template.md`.
+- 2026-02-16: Added `--purge` option to `scripts/run-current-e2e.sh` to support automatic `docker compose down -v` teardown for local volume cleanup.
 - 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot

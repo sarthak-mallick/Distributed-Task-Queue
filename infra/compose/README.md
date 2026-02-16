@@ -35,6 +35,12 @@ bash scripts/run-current-e2e.sh
 
 This runs infra + API + worker + end-to-end checks and tears down by default.
 
+To run E2E and remove volumes at teardown:
+
+```bash
+bash scripts/run-current-e2e.sh --purge
+```
+
 ## Endpoints
 - Kafka external: `localhost:9094`
 - RabbitMQ AMQP: `localhost:5672`

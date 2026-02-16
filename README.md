@@ -9,145 +9,37 @@ Prerequisites:
 - Docker Desktop (or Docker daemon) running
 - Go toolchain installed (Go 1.22+)
 
-Optional check:
+### 1) Run Full Current Validation (Recommended)
 ```bash
-docker info > /dev/null && echo "Docker is running"
+bash scripts/run-current-e2e.sh
 ```
 
-Optional Go check:
+What this command does:
+- creates `infra/compose/.env` from `.env.example` if missing
+- starts Kafka (KRaft), RabbitMQ, Redis, MongoDB
+- runs connectivity smoke checks
+- runs `go test ./...` for `api` and `worker`
+- starts API + worker with isolated Kafka topic and RabbitMQ queue for this run
+- submits a weather-profile job and waits for `completed` + `100%`
+- validates RabbitMQ status flow, Redis final status, Mongo persistence, Kafka message
+- tears everything down automatically by default
+
+### 2) Keep Infra Running After Test (Optional)
 ```bash
-go version
+bash scripts/run-current-e2e.sh --keep-infra
 ```
 
-### 1) Start Infra + Validate
+### 3) Skip Unit Tests During E2E (Optional)
 ```bash
-bash infra/compose/scripts/bootstrap-and-smoke.sh
+bash scripts/run-current-e2e.sh --skip-unit-tests
 ```
 
-This does all Day 1 foundation setup:
-- create `infra/compose/.env` from `.env.example` if missing
-- start Kafka (KRaft), RabbitMQ, Redis, MongoDB
-- run connectivity checks across all four services
-
-### 2) Build + Unit Test Services
-```bash
-cd api
-go mod tidy
-go test ./...
-
-cd ../worker
-go mod tidy
-go test ./...
-```
-
-### 3) Run API Service (Terminal 1)
-```bash
-cd api
-go run .
-```
-
-### 4) Run Worker Service (Terminal 2)
-```bash
-cd worker
-go run .
-```
-
-### 5) Validate API Health
-```bash
-curl -s http://localhost:8080/healthz | jq
-```
-
-Expected checks:
-- `kafka: true`
-- `redis: true`
-- `rabbitmq: true`
-
-### 6) Submit Test Job (Weather Profile)
-```bash
-curl -s -X POST http://localhost:8080/v1/jobs \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "job_type":"weather",
-    "payload":{
-      "city":"Austin",
-      "country_code":"US",
-      "units":"metric"
-    }
-  }'
-```
-
-Expected:
-- HTTP `202`
-- JSON includes `job_id`, `trace_id`, `job_type`, `state: "queued"`
-
-Supported `job_type` values in API submission:
-- `weather`
-- `quote`
-- `exchange_rate`
-- `github_user`
-
-### 7) Verify API Status Endpoint (RabbitMQ Request-Reply)
-```bash
-JOB_ID=<job_id_from_response>
-curl -s http://localhost:8080/v1/jobs/${JOB_ID}/status | jq
-```
-
-Expected:
-- `job_id` matches
-- `state` is one of `queued|running|completed|failed`
-- `progress_percent` is `0..100`
-- response comes through worker RabbitMQ reply path
-
-Optional unknown-job check:
-```bash
-curl -i -s http://localhost:8080/v1/jobs/00000000-0000-0000-0000-000000000000/status
-```
-
-Expected:
-- HTTP `404`
-- body includes `state: "not_found"`
-
-### 8) Verify Redis Status Reaches Completed
-```bash
-JOB_ID=<job_id_from_response>
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T redis redis-cli HGETALL job:${JOB_ID}:status
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T redis redis-cli TTL job:${JOB_ID}:status
-```
-
-Expected final Redis fields include:
-- `state` -> `completed`
-- `progress_percent` -> `100`
-
-### 9) Verify MongoDB Result Persistence
-```bash
-JOB_ID=<job_id_from_response>
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T mongo mongosh --quiet --eval "db.getSiblingDB('dtq').job_results.find({job_id:'${JOB_ID}'}).pretty()"
-```
-
-Expected:
-- one `job_results` document for the `job_id`
-- `final_state: \"completed\"`
-- normalized weather output fields in `output`
-
-### 10) Verify Kafka Message (Optional)
-For this weather test profile, the topic is `jobs.weather.v1`.  
-`--from-beginning` ensures you can read an already-published message (no timing race with submit).
-```bash
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env exec -T kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic jobs.weather.v1 --from-beginning --max-messages 1
-```
-
-### 11) Optional Infra Status Check
-```bash
-docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env ps
-```
-
-### 12) Teardown
-Stop containers, keep persisted data:
+### 4) Manual Teardown (Only Needed With `--keep-infra`)
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down
 ```
 
-Stop containers and delete persisted volumes/data:
+To also remove persisted data volumes:
 ```bash
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down -v
 ```
@@ -159,3 +51,4 @@ docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env
 - `infra/compose/` - local Kafka/RabbitMQ/Redis/Mongo stack
 - `contracts/` - message/data contracts
 - `docs/` - canonical spec and execution plans
+- `scripts/` - deterministic local test runners

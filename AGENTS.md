@@ -28,26 +28,13 @@ If there is any conflict:
 - Weekly status discipline:
   Keep exactly one execution file per active week (`docs/week-1-execution.md`, `docs/week-2-execution.md`, etc.).
   Update that file's live status sections before closing a thread.
-- Single-task sequencing discipline:
-  Execute one task ID at a time and wait for review/confirmation before moving to the next task ID.
-  Do not auto-batch all tasks for a day unless the user explicitly requests batching.
-- Code observability discipline:
-  Every new or modified function must include a short purpose comment and meaningful logging for key state transitions and error paths.
-- README runbook discipline:
-  Keep `README.md` as a single cumulative runbook for the latest completed day (Day N).
-  When Day N is added, remove/replace Day (N-1) step sections so instructions only reflect setup/test flow after Day N.
-- Context hygiene discipline:
-  Follow `docs/agent/workflow.md` context-hygiene rules to minimize prompt bloat automatically.
-  Agents own this upkeep; user prompting is not required.
+- Workflow authority discipline:
+  Treat `docs/agent/workflow.md` as the canonical location for execution-level rules (single-task sequencing, code observability, README/runbook maintenance, current E2E runner maintenance, and context hygiene).
+  Avoid duplicating those detailed rules in `AGENTS.md`.
 
-## Required Read Order for New Execution Threads
+## Thread Start Reference
 
-1. `docs/project-spec.md`
-2. Active `docs/week-N-execution.md`
-3. `docs/agent/workflow.md`
-4. `docs/agent/handoff-template.md`
-
-Read in minimal mode defined by `docs/agent/workflow.md` (do not load unnecessary sections).
+Use the thread-start checklist and minimal-read mode from `docs/agent/workflow.md` as the canonical process.
 
 ## Change Management
 

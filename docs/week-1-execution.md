@@ -276,6 +276,7 @@ Correlation rule:
 ## Week 1 Test Checklist
 
 - [ ] Fresh clone setup works with documented steps only.
+- [ ] `bash scripts/run-current-e2e.sh` passes from a clean local environment.
 - [ ] `docker compose up -d` starts Kafka (KRaft), RabbitMQ, Redis, MongoDB healthy.
 - [ ] Connectivity smoke checks pass for all core services.
 - [ ] `POST /v1/jobs` returns `202` with valid `job_id`.
@@ -308,11 +309,7 @@ Correlation rule:
 
 ## Reporting Format for Thread Updates
 
-- Scope targeted
-- What changed
-- Acceptance criteria status
-- Risks/blockers
-- Next smallest task
+Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating that structure here.
 
 ## Session Log (Append-Only)
 
@@ -341,6 +338,11 @@ Correlation rule:
 - 2026-02-16: Completed W1-011 by adding worker RabbitMQ progress responder with strict request validation, Redis-backed status lookup, and AMQP correlation/reply semantics.
 - 2026-02-16: Completed W1-012 by implementing API `GET /v1/jobs/{job_id}/status` over RabbitMQ request-reply with UUID path validation, timeout handling, and `not_found` mapping.
 - 2026-02-16: Updated root README/API/worker docs to Day-4 cumulative runbook and environment variables for RabbitMQ progress flow.
+- 2026-02-16: Added deterministic current E2E runner (`scripts/run-current-e2e.sh`) that isolates topic/queue per run and performs automatic API/worker startup, validation, and teardown.
+- 2026-02-16: Hardened connectivity smoke checks with startup retries for stable script-driven validation during local container startup.
+- 2026-02-16: Added workflow policy to keep `scripts/run-current-e2e.sh` updated as Day N advances and keep README aligned to that single canonical command.
+- 2026-02-16: Validated `scripts/run-current-e2e.sh` end-to-end locally (submit -> RabbitMQ status -> Redis completed -> Mongo persisted -> Kafka consumed) with automatic teardown.
+- 2026-02-16: De-duplicated instruction docs by keeping detailed execution rules in `docs/agent/workflow.md` and replacing repeated reporting-format bullets in this file with a pointer to `docs/agent/handoff-template.md`.
 - 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot

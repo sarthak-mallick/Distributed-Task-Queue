@@ -13,3 +13,7 @@
 # Tooling caches
 .cache/
 .tmp/
+
+# Node/Frontend artifacts
+node_modules/
+ui/dist/

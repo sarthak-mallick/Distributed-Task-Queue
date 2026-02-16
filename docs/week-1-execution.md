@@ -87,7 +87,7 @@ Update this table continuously during Week 1 execution.
 | W1-010 | Completed | 2026-02-15 | Worker persists final results to MongoDB `job_results` using idempotent upsert (`$setOnInsert`) and unique `job_id` index. |
 | W1-011 | Completed | 2026-02-16 | Worker now serves RabbitMQ progress request-reply on `progress.check.request.v1`, requiring `correlation_id` + `reply_to` and echoing correlation on replies. |
 | W1-012 | Completed | 2026-02-16 | API now exposes `GET /v1/jobs/{job_id}/status` backed by RabbitMQ request-reply with timeout + unknown-job handling. |
-| W1-013 | Not Started | 2026-02-14 | - |
+| W1-013 | Completed | 2026-02-16 | Implemented React UI (`ui/`) with generic submit form, status polling, progress bar, and Day-5 runbook updates. |
 | W1-014 | Not Started | 2026-02-14 | - |
 | W1-015 | Not Started | 2026-02-14 | - |
 
@@ -344,13 +344,15 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-16: Validated `scripts/run-current-e2e.sh` end-to-end locally (submit -> RabbitMQ status -> Redis completed -> Mongo persisted -> Kafka consumed) with automatic teardown.
 - 2026-02-16: De-duplicated instruction docs by keeping detailed execution rules in `docs/agent/workflow.md` and replacing repeated reporting-format bullets in this file with a pointer to `docs/agent/handoff-template.md`.
 - 2026-02-16: Added `--purge` option to `scripts/run-current-e2e.sh` to support automatic `docker compose down -v` teardown for local volume cleanup.
+- 2026-02-16: Completed W1-013 by implementing a Vite + React UI in `ui/` for generic job submission, response display, manual/auto status polling, and progress rendering.
+- 2026-02-16: Updated runbooks (`README.md`, `ui/README.md`, `infra/compose/README.md`) to completed-through-Day-5 instructions including UI startup and validation flow.
 - 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot
 
 - Week status: In progress
-- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010, W1-011, W1-012
+- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010, W1-011, W1-012, W1-013
 - In-progress tasks: None
 - Blockers: None
-- Day checkpoint: Day 4 complete
-- Next task: W1-013 implement basic React UI submit + status view
+- Day checkpoint: Day 5 complete
+- Next task: W1-014 implement stability/failure paths (retry/backoff, structured correlation logs, restart/reconnect checks)

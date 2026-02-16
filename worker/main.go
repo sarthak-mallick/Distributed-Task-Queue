@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,17 +32,18 @@ var appLogger = log.New(os.Stdout, "worker ", log.LstdFlags|log.LUTC)
 
 // config contains all runtime options for the worker process.
 type config struct {
-	kafkaBrokers   []string
-	kafkaGroupID   string
-	kafkaTopic     string
-	kafkaTopicTpl  string
-	kafkaTopics    []string
-	jobTypes       []string
-	fetchMinBytes  int
-	fetchMaxBytes  int
-	fetchMaxWait   time.Duration
-	processTimeout time.Duration
-	commitTimeout  time.Duration
+	kafkaBrokers    []string
+	kafkaGroupID    string
+	kafkaTopic      string
+	kafkaTopicTpl   string
+	kafkaTopics     []string
+	jobTypes        []string
+	fetchMinBytes   int
+	fetchMaxBytes   int
+	fetchMaxWait    time.Duration
+	fetchErrBackoff time.Duration
+	processTimeout  time.Duration
+	commitTimeout   time.Duration
 
 	redisAddr     string
 	redisUsername string
@@ -58,12 +60,16 @@ type config struct {
 	progressRequestQueue     string
 	progressConsumerTag      string
 	progressConsumerPrefetch int
+	progressReconnectBackoff time.Duration
 
 	weatherProvider        string
 	weatherHTTPTimeout     time.Duration
 	weatherGeocodingURL    string
 	weatherForecastURL     string
 	weatherUseMockFallback bool
+	weatherMaxAttempts     int
+	weatherRetryInitialBO  time.Duration
+	weatherRetryMaxBO      time.Duration
 }
 
 // kafkaConsumer abstracts kafka.Reader for testability of commit behavior.
@@ -265,6 +271,11 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	fetchErrBackoff, err := parseDurationEnv("WORKER_FETCH_ERROR_BACKOFF", 500*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
 	processTimeout, err := parseDurationEnv("WORKER_PROCESS_TIMEOUT", 45*time.Second)
 	if err != nil {
 		return config{}, err
@@ -295,7 +306,30 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	progressReconnectBackoff, err := parseDurationEnv("RABBITMQ_PROGRESS_RECONNECT_BACKOFF", 2*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
 	weatherMockFallback, err := parseBoolEnv("WEATHER_USE_MOCK_FALLBACK", true)
+	if err != nil {
+		return config{}, err
+	}
+
+	weatherMaxAttempts, err := parseIntEnv("WEATHER_MAX_ATTEMPTS", 3)
+	if err != nil {
+		return config{}, err
+	}
+	if weatherMaxAttempts < 1 {
+		return config{}, errors.New("WEATHER_MAX_ATTEMPTS must be >= 1")
+	}
+
+	weatherRetryInitialBackoff, err := parseDurationEnv("WEATHER_RETRY_INITIAL_BACKOFF", 500*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
+	weatherRetryMaxBackoff, err := parseDurationEnv("WEATHER_RETRY_MAX_BACKOFF", 4*time.Second)
 	if err != nil {
 		return config{}, err
 	}
@@ -306,16 +340,17 @@ func loadConfig() (config, error) {
 	}
 
 	cfg := config{
-		kafkaBrokers:   parseCSVEnv("WORKER_KAFKA_BROKERS", []string{"localhost:9094"}),
-		kafkaGroupID:   envOrDefault("WORKER_KAFKA_GROUP_ID", "dtq-worker-v1"),
-		kafkaTopic:     strings.TrimSpace(os.Getenv("WORKER_KAFKA_TOPIC")),
-		kafkaTopicTpl:  envOrDefault("WORKER_KAFKA_TOPIC_TEMPLATE", "jobs.%s.v1"),
-		jobTypes:       jobTypes,
-		fetchMinBytes:  fetchMinBytes,
-		fetchMaxBytes:  fetchMaxBytes,
-		fetchMaxWait:   fetchMaxWait,
-		processTimeout: processTimeout,
-		commitTimeout:  commitTimeout,
+		kafkaBrokers:    parseCSVEnv("WORKER_KAFKA_BROKERS", []string{"localhost:9094"}),
+		kafkaGroupID:    envOrDefault("WORKER_KAFKA_GROUP_ID", "dtq-worker-v1"),
+		kafkaTopic:      strings.TrimSpace(os.Getenv("WORKER_KAFKA_TOPIC")),
+		kafkaTopicTpl:   envOrDefault("WORKER_KAFKA_TOPIC_TEMPLATE", "jobs.%s.v1"),
+		jobTypes:        jobTypes,
+		fetchMinBytes:   fetchMinBytes,
+		fetchMaxBytes:   fetchMaxBytes,
+		fetchMaxWait:    fetchMaxWait,
+		fetchErrBackoff: fetchErrBackoff,
+		processTimeout:  processTimeout,
+		commitTimeout:   commitTimeout,
 
 		redisAddr:     envOrDefault("REDIS_ADDR", "localhost:6379"),
 		redisUsername: strings.TrimSpace(os.Getenv("REDIS_USERNAME")),
@@ -332,17 +367,21 @@ func loadConfig() (config, error) {
 		progressRequestQueue:     envOrDefault("RABBITMQ_PROGRESS_REQUEST_QUEUE", "progress.check.request.v1"),
 		progressConsumerTag:      envOrDefault("RABBITMQ_PROGRESS_CONSUMER_TAG", "dtq-worker-progress-v1"),
 		progressConsumerPrefetch: progressConsumerPrefetch,
+		progressReconnectBackoff: progressReconnectBackoff,
 
 		weatherProvider:        strings.ToLower(envOrDefault("WEATHER_PROVIDER", "openmeteo")),
 		weatherHTTPTimeout:     weatherHTTPTimeout,
 		weatherGeocodingURL:    envOrDefault("WEATHER_GEOCODING_URL", "https://geocoding-api.open-meteo.com/v1/search"),
 		weatherForecastURL:     envOrDefault("WEATHER_FORECAST_URL", "https://api.open-meteo.com/v1/forecast"),
 		weatherUseMockFallback: weatherMockFallback,
+		weatherMaxAttempts:     weatherMaxAttempts,
+		weatherRetryInitialBO:  weatherRetryInitialBackoff,
+		weatherRetryMaxBO:      weatherRetryMaxBackoff,
 	}
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s weather_provider=%s",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s weather_provider=%s weather_max_attempts=%d",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -354,6 +393,7 @@ func loadConfig() (config, error) {
 		cfg.mongoCollection,
 		cfg.progressRequestQueue,
 		cfg.weatherProvider,
+		cfg.weatherMaxAttempts,
 	)
 	return cfg, nil
 }
@@ -430,22 +470,13 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		return nil, fmt.Errorf("rabbitmq channel open failed: %w", err)
 	}
 
-	if err := rabbitChan.Qos(cfg.progressConsumerPrefetch, 0, false); err != nil {
+	if err := configureProgressChannel(rabbitChan, cfg); err != nil {
 		_ = rabbitChan.Close()
 		_ = rabbitConn.Close()
 		_ = reader.Close()
 		_ = redisClient.Close()
 		_ = mongoClient.Disconnect(context.Background())
-		return nil, fmt.Errorf("rabbitmq qos setup failed: %w", err)
-	}
-
-	if _, err := rabbitChan.QueueDeclare(cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
-		_ = rabbitChan.Close()
-		_ = rabbitConn.Close()
-		_ = reader.Close()
-		_ = redisClient.Close()
-		_ = mongoClient.Disconnect(context.Background())
-		return nil, fmt.Errorf("rabbitmq request queue declare failed: %w", err)
+		return nil, err
 	}
 
 	weatherClient, err := newWeatherClient(cfg, logger)
@@ -485,6 +516,17 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		cfg.progressRequestQueue,
 	)
 	return w, nil
+}
+
+// configureProgressChannel applies required QoS and queue declarations for progress requests.
+func configureProgressChannel(ch *amqp.Channel, cfg config) error {
+	if err := ch.Qos(cfg.progressConsumerPrefetch, 0, false); err != nil {
+		return fmt.Errorf("rabbitmq qos setup failed: %w", err)
+	}
+	if _, err := ch.QueueDeclare(cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
+		return fmt.Errorf("rabbitmq request queue declare failed: %w", err)
+	}
+	return nil
 }
 
 // close releases Kafka, Redis, and MongoDB resources during shutdown.
@@ -542,7 +584,11 @@ func (w *worker) runKafkaLoop(ctx context.Context) error {
 				w.logger.Println("kafka consumer loop stopping due to cancellation")
 				return nil
 			}
-			w.logger.Printf("kafka fetch failed: %v", err)
+			w.logger.Printf("kafka fetch failed err=%v; retrying after=%s", err, w.cfg.fetchErrBackoff)
+			if err := sleepWithContext(ctx, w.cfg.fetchErrBackoff); err != nil {
+				w.logger.Println("kafka fetch backoff canceled")
+				return nil
+			}
 			continue
 		}
 
@@ -561,8 +607,28 @@ func (w *worker) runKafkaLoop(ctx context.Context) error {
 
 // runProgressResponder serves RabbitMQ progress check requests until cancellation.
 func (w *worker) runProgressResponder(ctx context.Context) error {
-	if w.rabbitChan == nil {
-		return errors.New("rabbitmq channel is not configured")
+	for {
+		err := w.runProgressResponderSession(ctx)
+		if err == nil || ctx.Err() != nil {
+			return nil
+		}
+
+		w.logger.Printf(
+			"progress responder session failed err=%v; reconnecting after=%s",
+			err,
+			w.cfg.progressReconnectBackoff,
+		)
+		if err := sleepWithContext(ctx, w.cfg.progressReconnectBackoff); err != nil {
+			w.logger.Println("progress responder reconnect sleep canceled")
+			return nil
+		}
+	}
+}
+
+// runProgressResponderSession runs one RabbitMQ consume session until cancel or channel failure.
+func (w *worker) runProgressResponderSession(ctx context.Context) error {
+	if err := w.reopenProgressChannel(); err != nil {
+		return err
 	}
 
 	deliveries, err := w.rabbitChan.Consume(
@@ -608,6 +674,32 @@ func (w *worker) runProgressResponder(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// reopenProgressChannel re-creates the RabbitMQ channel used for request-reply progress handling.
+func (w *worker) reopenProgressChannel() error {
+	if w.rabbitConn == nil {
+		return errors.New("rabbitmq connection is not configured")
+	}
+
+	if w.rabbitChan != nil {
+		if err := w.rabbitChan.Close(); err != nil {
+			w.logger.Printf("progress channel close before reopen failed: %v", err)
+		}
+	}
+
+	ch, err := w.rabbitConn.Channel()
+	if err != nil {
+		return fmt.Errorf("rabbitmq channel reopen failed: %w", err)
+	}
+
+	if err := configureProgressChannel(ch, w.cfg); err != nil {
+		_ = ch.Close()
+		return err
+	}
+
+	w.rabbitChan = ch
+	return nil
 }
 
 // handleProgressDelivery validates one status request and publishes the correlated reply.
@@ -810,9 +902,9 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		return fmt.Errorf("mongo upsert failed: %w", err)
 	}
 	if inserted {
-		w.logger.Printf("mongo result inserted job_id=%s job_type=%s", job.JobID, job.JobType)
+		w.logger.Printf("mongo result inserted job_id=%s trace_id=%s job_type=%s", job.JobID, job.TraceID, job.JobType)
 	} else {
-		w.logger.Printf("mongo result already exists (idempotent replay) job_id=%s job_type=%s", job.JobID, job.JobType)
+		w.logger.Printf("mongo result already exists (idempotent replay) job_id=%s trace_id=%s job_type=%s", job.JobID, job.TraceID, job.JobType)
 	}
 
 	completionMessage := strings.TrimSpace(result.Message)
@@ -849,11 +941,11 @@ func (w *worker) updateStatus(ctx context.Context, job kafkaJobMessage, state st
 	}
 
 	if err := w.statusStore.UpsertStatus(ctx, record); err != nil {
-		w.logger.Printf("status store write failed job_id=%s state=%s progress=%d err=%v", job.JobID, state, progress, err)
+		w.logger.Printf("status store write failed job_id=%s trace_id=%s state=%s progress=%d err=%v", job.JobID, job.TraceID, state, progress, err)
 		return err
 	}
 
-	w.logger.Printf("status updated job_id=%s state=%s progress=%d", job.JobID, state, progress)
+	w.logger.Printf("status updated job_id=%s trace_id=%s state=%s progress=%d", job.JobID, job.TraceID, state, progress)
 	return nil
 }
 
@@ -908,7 +1000,7 @@ func (w *worker) handleWeatherJob(ctx context.Context, job kafkaJobMessage) (job
 		return jobExecutionResult{}, errors.New("weather payload country_code must be ISO 3166-1 alpha-2")
 	}
 
-	obs, err := w.weather.Fetch(ctx, payload)
+	obs, err := w.fetchWeatherWithRetry(ctx, job, payload)
 	if err != nil {
 		return jobExecutionResult{}, fmt.Errorf("weather provider request failed: %w", err)
 	}
@@ -928,6 +1020,140 @@ func (w *worker) handleWeatherJob(ctx context.Context, job kafkaJobMessage) (job
 		},
 		Message: "weather job completed",
 	}, nil
+}
+
+// fetchWeatherWithRetry calls the configured weather provider with bounded retry/backoff semantics.
+func (w *worker) fetchWeatherWithRetry(ctx context.Context, job kafkaJobMessage, payload weatherPayload) (weatherObservation, error) {
+	if w.weather == nil {
+		return weatherObservation{}, errors.New("weather client is not configured")
+	}
+
+	maxAttempts := w.cfg.weatherMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		obs, err := w.weather.Fetch(ctx, payload)
+		if err == nil {
+			if attempt > 1 {
+				w.logger.Printf(
+					"weather provider recovered job_id=%s trace_id=%s city=%s attempt=%d/%d",
+					job.JobID,
+					job.TraceID,
+					payload.City,
+					attempt,
+					maxAttempts,
+				)
+			}
+			return obs, nil
+		}
+
+		lastErr = err
+		if !isRetryableWeatherError(err) {
+			w.logger.Printf(
+				"weather provider non-retryable failure job_id=%s trace_id=%s city=%s attempt=%d/%d err=%v",
+				job.JobID,
+				job.TraceID,
+				payload.City,
+				attempt,
+				maxAttempts,
+				err,
+			)
+			return weatherObservation{}, err
+		}
+		if attempt >= maxAttempts {
+			break
+		}
+
+		backoff := calculateRetryBackoff(w.cfg.weatherRetryInitialBO, w.cfg.weatherRetryMaxBO, attempt)
+		w.logger.Printf(
+			"weather provider transient failure job_id=%s trace_id=%s city=%s attempt=%d/%d retry_in=%s err=%v",
+			job.JobID,
+			job.TraceID,
+			payload.City,
+			attempt,
+			maxAttempts,
+			backoff,
+			err,
+		)
+
+		if err := sleepWithContext(ctx, backoff); err != nil {
+			return weatherObservation{}, err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("weather provider failed with unknown error")
+	}
+	w.logger.Printf(
+		"weather provider exhausted retries job_id=%s trace_id=%s city=%s attempts=%d err=%v",
+		job.JobID,
+		job.TraceID,
+		payload.City,
+		maxAttempts,
+		lastErr,
+	)
+	return weatherObservation{}, lastErr
+}
+
+// isRetryableWeatherError classifies provider errors that should trigger retry/backoff.
+func isRetryableWeatherError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, "no coordinates found") {
+		return false
+	}
+	return true
+}
+
+// calculateRetryBackoff computes exponential retry delay with optional max cap.
+func calculateRetryBackoff(initial, max time.Duration, attempt int) time.Duration {
+	if initial <= 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	delay := initial
+	for i := 1; i < attempt; i++ {
+		if delay > time.Duration(math.MaxInt64/2) {
+			delay = time.Duration(math.MaxInt64)
+			break
+		}
+		delay *= 2
+	}
+
+	if max > 0 && delay > max {
+		return max
+	}
+	return delay
+}
+
+// sleepWithContext waits for duration or returns earlier when context is canceled.
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // handleGenericJob keeps the worker extensible for non-weather job types in Week 1.

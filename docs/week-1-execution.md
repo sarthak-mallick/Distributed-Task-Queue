@@ -88,7 +88,7 @@ Update this table continuously during Week 1 execution.
 | W1-011 | Completed | 2026-02-16 | Worker now serves RabbitMQ progress request-reply on `progress.check.request.v1`, requiring `correlation_id` + `reply_to` and echoing correlation on replies. |
 | W1-012 | Completed | 2026-02-16 | API now exposes `GET /v1/jobs/{job_id}/status` backed by RabbitMQ request-reply with timeout + unknown-job handling. |
 | W1-013 | Completed | 2026-02-16 | Implemented React UI (`ui/`) with generic submit form, status polling, progress bar, and Day-5 runbook updates. |
-| W1-014 | Not Started | 2026-02-14 | - |
+| W1-014 | Completed | 2026-02-16 | Added worker retry/backoff + reconnect hardening, structured correlation logs, and validated via unit tests and full `run-current-e2e.sh --with-ui-checks --purge`. |
 | W1-015 | Not Started | 2026-02-14 | - |
 
 ## Implementation Order
@@ -349,13 +349,15 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-16: Added preflight checks to `scripts/run-current-e2e.sh` for required commands and Docker daemon readiness to fail fast with actionable errors.
 - 2026-02-16: Executed Day-5 validation: backend `scripts/run-current-e2e.sh --purge` passed end-to-end; UI dependency install and `npm run build` passed; UI dev server responded `HTTP 200` on `http://localhost:5173/`.
 - 2026-02-16: Enhanced `scripts/run-current-e2e.sh` with `--with-ui-checks` to include frontend dependency install (`npm ci`/`npm install`) and `npm run build` in one-command validation.
+- 2026-02-16: Completed W1-014 by adding worker stability hardening: weather-provider transient retry/backoff controls, RabbitMQ progress-responder reconnect loop, and expanded `job_id`/`trace_id` structured logs on key transitions.
+- 2026-02-16: Added/ran Day-6 validation: worker unit tests for retry logic/backoff helpers passed, and full `scripts/run-current-e2e.sh --with-ui-checks --purge` passed.
 - 2026-02-16: Sandbox cannot resolve `proxy.golang.org`, so `go mod tidy`/`go test` for updated API/worker modules must be executed on the local developer machine.
 
 ## Handoff Snapshot
 
 - Week status: In progress
-- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010, W1-011, W1-012, W1-013
+- Completed tasks: W1-001, W1-002, W1-003, W1-004, W1-005, W1-006, W1-007, W1-008, W1-009, W1-010, W1-011, W1-012, W1-013, W1-014
 - In-progress tasks: None
 - Blockers: None
-- Day checkpoint: Day 5 complete
-- Next task: W1-014 implement stability/failure paths (retry/backoff, structured correlation logs, restart/reconnect checks)
+- Day checkpoint: Day 6 complete
+- Next task: W1-015 quickstart/test/demo checklist finalization and demo buffer fixes

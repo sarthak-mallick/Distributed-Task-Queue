@@ -19,11 +19,16 @@ docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env
 bash infra/compose/scripts/smoke-connectivity.sh
 ```
 
-## One-Command Day 1 Validation
+## One-Command Infra Validation
 
 ```bash
 bash infra/compose/scripts/bootstrap-and-smoke.sh
 ```
+
+`bootstrap-and-smoke.sh` now runs:
+- Compose startup
+- Protocol connectivity smoke checks
+- Canonical Kafka topic bootstrap (`jobs.<job_type>.v1`)
 
 ## Full Current E2E Validation (Recommended)
 

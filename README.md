@@ -1,13 +1,13 @@
 # Distributed-Task-Queue
 
-A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor real-time progress.
+A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
 
-## Current Runbook (Completed Through Day 7)
-This runbook reflects the latest completed implementation slice and supersedes prior day-specific steps.
+## Current Runbook (Completed Through Week 2 Day 9)
+This runbook reflects the latest completed implementation slice and supersedes prior flow details.
 
 Prerequisites:
 - Docker Desktop (or Docker daemon) running
-- Go toolchain installed (Go 1.22+)
+- Go toolchain installed (Go 1.23+)
 - Node.js + npm installed (Node 20+ recommended)
 
 ### 1) Start Infra + Verify Connectivity + Canonical Kafka Topics
@@ -15,15 +15,15 @@ Prerequisites:
 bash infra/compose/scripts/bootstrap-and-smoke.sh
 ```
 
-### 2) Run API (Terminal 1)
+### 2) Run Worker (Terminal 1)
 ```bash
-cd api
+cd worker
 go run .
 ```
 
-### 3) Run Worker (Terminal 2)
+### 3) Run API (Terminal 2)
 ```bash
-cd worker
+cd api
 go run .
 ```
 
@@ -36,15 +36,15 @@ npm run dev
 
 Open `http://localhost:5173`.
 
-### 5) Validate Through UI
+### 5) Validate Through UI (GraphQL + Subscriptions)
 
 1. Submit a `weather` job from the UI.
-2. Confirm submit response returns `job_id` and accepted state.
-3. Confirm status tracker progresses to `completed` with `100%`.
-4. Optionally paste any `job_id` into status tracker and check/poll manually.
+2. Confirm submit response contains `jobId` and `queued` state.
+3. Confirm status tracker receives live progress updates over WebSocket subscription.
+4. Confirm final terminal state is `completed` with `100%` progress.
 
 ### 6) Full Automated Validation (Recommended)
-Use this to run the full current end-to-end path (backend + UI checks) and purge volumes at teardown:
+Use this to run the full current end-to-end flow (GraphQL mutation/query/subscription + Redis/Mongo/Kafka checks) and purge volumes at teardown:
 ```bash
 bash scripts/run-current-e2e.sh --with-ui-checks --purge
 ```
@@ -66,11 +66,11 @@ To remove persisted data volumes too:
 docker compose -f infra/compose/docker-compose.yml --env-file infra/compose/.env down -v
 ```
 
-## Week 1 Layout
-- `api/` - temporary Go REST API (submit + status)
-- `worker/` - Go Kafka consumer and progress responder
-- `ui/` - basic React submit/status interface
+## Current Layout
+- `api/` - Go API with GraphQL mutation/query/subscription surface and Kafka enqueue path
+- `worker/` - Go worker Kafka consumer + gRPC status/progress service + RabbitMQ responder compatibility
+- `ui/` - React Apollo client UI with GraphQL WebSocket subscriptions
 - `infra/compose/` - local Kafka/RabbitMQ/Redis/Mongo stack
-- `contracts/` - message/data contracts
-- `docs/` - canonical spec and execution plans
+- `contracts/` - Week 1 data contracts + Week 2 gRPC contract
+- `docs/` - canonical spec and active week execution plans
 - `scripts/` - deterministic local test runners

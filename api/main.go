@@ -17,10 +17,13 @@ import (
 	"syscall"
 	"time"
 
+	"distributed-task-queue/api/internal/apiworkergrpc"
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // appLogger is the process-wide logger used for startup and helper-function logs.
@@ -48,6 +51,9 @@ type config struct {
 	rabbitURL            string
 	progressRequestQueue string
 	progressReplyTimeout time.Duration
+	workerGRPCAddr       string
+	workerGRPCDialTO     time.Duration
+	subscriptionPoll     time.Duration
 }
 
 // app bundles service dependencies and configuration.
@@ -57,6 +63,8 @@ type app struct {
 	kafkaWriter *kafka.Writer
 	redisClient *redis.Client
 	rabbitConn  *amqp.Connection
+	workerConn  *grpc.ClientConn
+	workerGRPC  apiworkergrpc.APIWorkerClient
 }
 
 const (
@@ -192,6 +200,16 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	workerGRPCDialTO, err := parseDurationEnv("WORKER_GRPC_DIAL_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
+	subscriptionPoll, err := parseDurationEnv("GRAPHQL_SUBSCRIPTION_POLL_INTERVAL", 750*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
 		listenAddr:           envOrDefault("API_ADDR", ":8080"),
 		kafkaBrokers:         parseCSVEnv("KAFKA_BROKERS", []string{"localhost:9094"}),
@@ -206,10 +224,13 @@ func loadConfig() (config, error) {
 		rabbitURL:            envOrDefault("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
 		progressRequestQueue: envOrDefault("RABBITMQ_PROGRESS_REQUEST_QUEUE", "progress.check.request.v1"),
 		progressReplyTimeout: progressReplyTimeout,
+		workerGRPCAddr:       envOrDefault("WORKER_GRPC_ADDR", "localhost:9090"),
+		workerGRPCDialTO:     workerGRPCDialTO,
+		subscriptionPoll:     subscriptionPoll,
 	}
 
 	appLogger.Printf(
-		"config loaded addr=%s kafka_brokers=%v kafka_topic=%q kafka_topic_template=%q redis_addr=%s redis_db=%d status_ttl=%s request_timeout=%s progress_request_queue=%s progress_reply_timeout=%s",
+		"config loaded addr=%s kafka_brokers=%v kafka_topic=%q kafka_topic_template=%q redis_addr=%s redis_db=%d status_ttl=%s request_timeout=%s progress_request_queue=%s progress_reply_timeout=%s worker_grpc_addr=%s worker_grpc_dial_timeout=%s graphql_subscription_poll_interval=%s",
 		cfg.listenAddr,
 		cfg.kafkaBrokers,
 		cfg.kafkaTopic,
@@ -220,6 +241,9 @@ func loadConfig() (config, error) {
 		cfg.requestTimeout,
 		cfg.progressRequestQueue,
 		cfg.progressReplyTimeout,
+		cfg.workerGRPCAddr,
+		cfg.workerGRPCDialTO,
+		cfg.subscriptionPoll,
 	)
 	return cfg, nil
 }
@@ -249,6 +273,20 @@ func newApp(cfg config, logger *log.Logger) (*app, error) {
 		logger.Printf("rabbitmq setup channel close failed: %v", err)
 	}
 
+	dialCtx, cancel := context.WithTimeout(context.Background(), cfg.workerGRPCDialTO)
+	defer cancel()
+
+	workerConn, err := grpc.DialContext(
+		dialCtx,
+		cfg.workerGRPCAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(apiworkergrpc.DefaultClientCallOptions()...),
+	)
+	if err != nil {
+		_ = rabbitConn.Close()
+		return nil, fmt.Errorf("worker gRPC dial failed addr=%s: %w", cfg.workerGRPCAddr, err)
+	}
+
 	return &app{
 		cfg:    cfg,
 		logger: logger,
@@ -268,6 +306,8 @@ func newApp(cfg config, logger *log.Logger) (*app, error) {
 			DB:       cfg.redisDB,
 		}),
 		rabbitConn: rabbitConn,
+		workerConn: workerConn,
+		workerGRPC: apiworkergrpc.NewAPIWorkerClient(workerConn),
 	}, nil
 }
 
@@ -280,6 +320,11 @@ func (a *app) close() {
 	if err := a.redisClient.Close(); err != nil {
 		a.logger.Printf("redis close failed: %v", err)
 	}
+	if a.workerConn != nil {
+		if err := a.workerConn.Close(); err != nil {
+			a.logger.Printf("worker gRPC connection close failed: %v", err)
+		}
+	}
 	if a.rabbitConn != nil {
 		if err := a.rabbitConn.Close(); err != nil {
 			a.logger.Printf("rabbitmq connection close failed: %v", err)
@@ -289,11 +334,13 @@ func (a *app) close() {
 
 // routes registers HTTP endpoints.
 func (a *app) routes() http.Handler {
-	a.logger.Println("registering routes: GET /healthz, POST /v1/jobs, GET /v1/jobs/{job_id}/status")
+	a.logger.Println("registering routes: GET /healthz, POST /graphql, GET /graphql/ws, legacy /v1/jobs disabled")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.handleHealthz)
-	mux.HandleFunc("/v1/jobs", a.handleSubmitJob)
-	mux.HandleFunc("/v1/jobs/", a.handleJobStatus)
+	mux.HandleFunc("/graphql", a.handleGraphQL)
+	mux.HandleFunc("/graphql/ws", a.handleGraphQLWebSocket)
+	mux.HandleFunc("/v1/jobs", a.handleLegacyRESTDisabled)
+	mux.HandleFunc("/v1/jobs/", a.handleLegacyRESTDisabled)
 	return a.withCORS(mux)
 }
 
@@ -362,20 +409,40 @@ func (a *app) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		_ = ch.Close()
 	}
 
+	grpcOK := false
+	if a.workerGRPC != nil {
+		_, err := a.workerGRPC.GetJobStatus(ctx, &apiworkergrpc.GetJobStatusRequest{
+			JobID: "00000000-0000-0000-0000-000000000000",
+		})
+		if err != nil {
+			a.logger.Printf("healthz worker gRPC check failed: %v", err)
+		} else {
+			grpcOK = true
+		}
+	}
+
 	statusCode := http.StatusOK
 	overall := "ok"
-	if !kafkaOK || !redisOK || !rabbitOK {
+	if !kafkaOK || !redisOK || !rabbitOK || !grpcOK {
 		statusCode = http.StatusServiceUnavailable
 		overall = "degraded"
 	}
 
-	a.logger.Printf("healthz result status=%s kafka_ok=%t redis_ok=%t rabbit_ok=%t", overall, kafkaOK, redisOK, rabbitOK)
+	a.logger.Printf(
+		"healthz result status=%s kafka_ok=%t redis_ok=%t rabbit_ok=%t grpc_ok=%t",
+		overall,
+		kafkaOK,
+		redisOK,
+		rabbitOK,
+		grpcOK,
+	)
 	writeJSON(w, statusCode, map[string]any{
 		"status": overall,
 		"checks": map[string]bool{
 			"kafka":    kafkaOK,
 			"redis":    redisOK,
 			"rabbitmq": rabbitOK,
+			"grpc":     grpcOK,
 		},
 		"time": time.Now().UTC().Format(time.RFC3339),
 	})

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,12 +20,14 @@ import (
 	"syscall"
 	"time"
 
+	"distributed-task-queue/worker/internal/apiworkergrpc"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"google.golang.org/grpc"
 )
 
 // appLogger is the process-wide logger used across startup and runtime paths.
@@ -61,6 +64,8 @@ type config struct {
 	progressConsumerTag      string
 	progressConsumerPrefetch int
 	progressReconnectBackoff time.Duration
+	grpcListenAddr           string
+	grpcPollInterval         time.Duration
 
 	weatherProvider        string
 	weatherHTTPTimeout     time.Duration
@@ -103,6 +108,7 @@ type worker struct {
 	mongoClient *mongo.Client
 	rabbitConn  *amqp.Connection
 	rabbitChan  *amqp.Channel
+	grpcServer  *grpc.Server
 	statusStore statusStore
 	resultStore resultStore
 	weather     weatherClient
@@ -311,6 +317,11 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	grpcPollInterval, err := parseDurationEnv("WORKER_GRPC_POLL_INTERVAL", 750*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
 	weatherMockFallback, err := parseBoolEnv("WEATHER_USE_MOCK_FALLBACK", true)
 	if err != nil {
 		return config{}, err
@@ -368,6 +379,8 @@ func loadConfig() (config, error) {
 		progressConsumerTag:      envOrDefault("RABBITMQ_PROGRESS_CONSUMER_TAG", "dtq-worker-progress-v1"),
 		progressConsumerPrefetch: progressConsumerPrefetch,
 		progressReconnectBackoff: progressReconnectBackoff,
+		grpcListenAddr:           envOrDefault("WORKER_GRPC_ADDR", ":9090"),
+		grpcPollInterval:         grpcPollInterval,
 
 		weatherProvider:        strings.ToLower(envOrDefault("WEATHER_PROVIDER", "openmeteo")),
 		weatherHTTPTimeout:     weatherHTTPTimeout,
@@ -381,7 +394,7 @@ func loadConfig() (config, error) {
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s weather_provider=%s weather_max_attempts=%d",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -392,6 +405,8 @@ func loadConfig() (config, error) {
 		cfg.mongoDatabase,
 		cfg.mongoCollection,
 		cfg.progressRequestQueue,
+		cfg.grpcListenAddr,
+		cfg.grpcPollInterval,
 		cfg.weatherProvider,
 		cfg.weatherMaxAttempts,
 	)
@@ -489,6 +504,8 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		return nil, err
 	}
 
+	grpcServer := grpc.NewServer()
+
 	w := &worker{
 		cfg:         cfg,
 		logger:      logger,
@@ -497,10 +514,12 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		mongoClient: mongoClient,
 		rabbitConn:  rabbitConn,
 		rabbitChan:  rabbitChan,
+		grpcServer:  grpcServer,
 		statusStore: &redisHashStatusStore{client: redisClient, ttl: cfg.statusTTL, logger: logger},
 		resultStore: resultStore,
 		weather:     weatherClient,
 	}
+	apiworkergrpc.RegisterAPIWorkerServer(grpcServer, w)
 
 	w.handlers = map[string]jobHandler{
 		"weather":       w.handleWeatherJob,
@@ -510,10 +529,11 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 	}
 
 	logger.Printf(
-		"worker initialized topics=%v group_id=%s progress_request_queue=%s",
+		"worker initialized topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s",
 		cfg.kafkaTopics,
 		cfg.kafkaGroupID,
 		cfg.progressRequestQueue,
+		cfg.grpcListenAddr,
 	)
 	return w, nil
 }
@@ -532,6 +552,9 @@ func configureProgressChannel(ch *amqp.Channel, cfg config) error {
 // close releases Kafka, Redis, and MongoDB resources during shutdown.
 func (w *worker) close() {
 	w.logger.Println("closing worker dependencies")
+	if w.grpcServer != nil {
+		w.grpcServer.GracefulStop()
+	}
 	if w.rabbitChan != nil {
 		if err := w.rabbitChan.Close(); err != nil {
 			w.logger.Printf("rabbit channel close failed: %v", err)
@@ -560,11 +583,16 @@ func (w *worker) close() {
 // run starts the long-running fetch/process loop until context cancellation.
 func (w *worker) run(ctx context.Context) error {
 	w.logger.Printf(
-		"worker loops starting topics=%v group_id=%s progress_request_queue=%s",
+		"worker loops starting topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s",
 		w.cfg.kafkaTopics,
 		w.cfg.kafkaGroupID,
 		w.cfg.progressRequestQueue,
+		w.cfg.grpcListenAddr,
 	)
+
+	if err := w.startGRPCServer(ctx); err != nil {
+		return err
+	}
 
 	go func() {
 		if err := w.runProgressResponder(ctx); err != nil && ctx.Err() == nil {
@@ -573,6 +601,33 @@ func (w *worker) run(ctx context.Context) error {
 	}()
 
 	return w.runKafkaLoop(ctx)
+}
+
+// startGRPCServer starts worker's gRPC status service and shuts it down on context cancel.
+func (w *worker) startGRPCServer(ctx context.Context) error {
+	if w.grpcServer == nil {
+		return errors.New("grpc server is not configured")
+	}
+
+	listener, err := net.Listen("tcp", w.cfg.grpcListenAddr)
+	if err != nil {
+		return fmt.Errorf("grpc listen failed addr=%s: %w", w.cfg.grpcListenAddr, err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		w.logger.Println("grpc server shutdown requested")
+		w.grpcServer.GracefulStop()
+		_ = listener.Close()
+	}()
+
+	go func() {
+		w.logger.Printf("grpc server listening addr=%s", w.cfg.grpcListenAddr)
+		if err := w.grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			w.logger.Printf("grpc server stopped with error: %v", err)
+		}
+	}()
+	return nil
 }
 
 // runKafkaLoop consumes Kafka messages until cancellation and applies job handlers.
@@ -808,6 +863,97 @@ func (w *worker) buildProgressReply(ctx context.Context, jobID string) (progress
 		Message:         message,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// GetJobStatus returns a single status snapshot for API gRPC callers.
+func (w *worker) GetJobStatus(ctx context.Context, req *apiworkergrpc.GetJobStatusRequest) (*apiworkergrpc.JobStatusReply, error) {
+	if req == nil {
+		return nil, errors.New("request is required")
+	}
+	jobID := strings.TrimSpace(req.JobID)
+	if jobID == "" {
+		return nil, errors.New("job_id is required")
+	}
+
+	reply, err := w.buildProgressReply(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return progressReplyToGRPC(reply), nil
+}
+
+// SubscribeJobProgress streams status changes until a terminal job state.
+func (w *worker) SubscribeJobProgress(req *apiworkergrpc.SubscribeJobProgressRequest, stream apiworkergrpc.APIWorker_SubscribeJobProgressServer) error {
+	if req == nil {
+		return errors.New("request is required")
+	}
+	jobID := strings.TrimSpace(req.JobID)
+	if jobID == "" {
+		return errors.New("job_id is required")
+	}
+
+	interval := w.cfg.grpcPollInterval
+	if req.PollIntervalMS > 0 {
+		interval = time.Duration(req.PollIntervalMS) * time.Millisecond
+	}
+	if interval < 200*time.Millisecond {
+		interval = 200 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	lastSnapshot := ""
+	for {
+		reply, err := w.buildProgressReply(stream.Context(), jobID)
+		if err != nil {
+			return err
+		}
+
+		snapshot := fmt.Sprintf("%s|%d|%s", reply.State, reply.ProgressPercent, reply.Message)
+		if snapshot != lastSnapshot {
+			if err := stream.Send(progressReplyToGRPC(reply)); err != nil {
+				return err
+			}
+			w.logger.Printf(
+				"grpc progress event sent job_id=%s state=%s progress=%d",
+				reply.JobID,
+				reply.State,
+				reply.ProgressPercent,
+			)
+			lastSnapshot = snapshot
+			if isTerminalJobState(reply.State) {
+				return nil
+			}
+		}
+
+		select {
+		case <-stream.Context().Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// progressReplyToGRPC converts internal status replies into gRPC response shape.
+func progressReplyToGRPC(reply progressCheckReply) *apiworkergrpc.JobStatusReply {
+	return &apiworkergrpc.JobStatusReply{
+		JobID:           reply.JobID,
+		State:           reply.State,
+		ProgressPercent: int32(reply.ProgressPercent),
+		Message:         reply.Message,
+		Timestamp:       reply.Timestamp,
+	}
+}
+
+// isTerminalJobState returns true when no further progress updates are expected.
+func isTerminalJobState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "completed", "failed", "not_found":
+		return true
+	default:
+		return false
+	}
 }
 
 // readJobStatus fetches the canonical Redis hash for a job status key.

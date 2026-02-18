@@ -1,6 +1,6 @@
 # Contracts
 
-Message and data contracts for Kafka, Redis, MongoDB, and RabbitMQ live here.
+Message and data contracts for Kafka, Redis, MongoDB, RabbitMQ, and gRPC live here.
 
 ## Week 1 Contract Artifacts
 
@@ -27,4 +27,13 @@ Message and data contracts for Kafka, Redis, MongoDB, and RabbitMQ live here.
 
 Canonical references:
 - `docs/week-1-execution.md`
+- `docs/project-spec.md`
+
+## Week 2 Contract Artifacts
+
+- API-worker gRPC service contract:
+  - `contracts/grpc/api-worker-v1.proto`
+
+Canonical references:
+- `docs/week-2-execution.md`
 - `docs/project-spec.md`

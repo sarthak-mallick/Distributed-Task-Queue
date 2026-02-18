@@ -1,3 +1,14 @@
+import {
+  ApolloClient,
+  HttpLink,
+  InMemoryCache,
+  gql,
+  split,
+} from "@apollo/client";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { ApolloProvider, useLazyQuery, useMutation, useSubscription } from "@apollo/client/react";
+import { getMainDefinition } from "@apollo/client/utilities";
+import { createClient } from "graphql-ws";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const JOB_TYPE_PRESETS = {
@@ -9,13 +20,50 @@ const JOB_TYPE_PRESETS = {
 
 const TERMINAL_STATES = new Set(["completed", "failed", "not_found"]);
 
+const SUBMIT_JOB_MUTATION = gql`
+  mutation SubmitJob($input: SubmitJobInput!) {
+    submitJob(input: $input) {
+      jobId
+      traceId
+      jobType
+      state
+      submittedAt
+      message
+    }
+  }
+`;
+
+const JOB_STATUS_QUERY = gql`
+  query JobStatus($jobId: ID!) {
+    jobStatus(jobId: $jobId) {
+      jobId
+      state
+      progressPercent
+      message
+      timestamp
+    }
+  }
+`;
+
+const JOB_PROGRESS_SUBSCRIPTION = gql`
+  subscription JobProgress($jobId: ID!) {
+    jobProgress(jobId: $jobId) {
+      jobId
+      state
+      progressPercent
+      message
+      timestamp
+    }
+  }
+`;
+
 // createDefaultPayload returns formatted JSON payload text for one job type.
 function createDefaultPayload(jobType) {
   const payload = JOB_TYPE_PRESETS[jobType] ?? {};
   return JSON.stringify(payload, null, 2);
 }
 
-// normalizeApiBaseUrl standardizes API base input for request URL assembly.
+// normalizeApiBaseUrl standardizes API base input for GraphQL endpoint assembly.
 function normalizeApiBaseUrl(rawUrl) {
   const trimmed = String(rawUrl || "").trim();
   const fallback = "http://localhost:8080";
@@ -23,6 +71,54 @@ function normalizeApiBaseUrl(rawUrl) {
     return fallback;
   }
   return trimmed.replace(/\/+$/, "");
+}
+
+// toWebSocketUrl converts API base URL into GraphQL websocket endpoint URL.
+function toWebSocketUrl(apiBaseUrl) {
+  const url = new URL(apiBaseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/graphql/ws";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+// createApolloBundle creates Apollo client and websocket disposable resources.
+function createApolloBundle(apiBaseUrl) {
+  const httpLink = new HttpLink({ uri: `${apiBaseUrl}/graphql` });
+
+  const wsClient = createClient({
+    url: toWebSocketUrl(apiBaseUrl),
+    lazy: true,
+    retryAttempts: 3,
+  });
+  const wsLink = new GraphQLWsLink(wsClient);
+
+  const link = split(
+    ({ query }) => {
+      const definition = getMainDefinition(query);
+      return definition.kind === "OperationDefinition" && definition.operation === "subscription";
+    },
+    wsLink,
+    httpLink
+  );
+
+  const client = new ApolloClient({
+    link,
+    cache: new InMemoryCache(),
+    defaultOptions: {
+      query: { fetchPolicy: "no-cache" },
+      watchQuery: { fetchPolicy: "no-cache" },
+    },
+  });
+
+  return {
+    client,
+    dispose: () => {
+      wsClient.dispose();
+      client.stop();
+    },
+  };
 }
 
 // parsePayloadJSON validates payload textarea content and requires an object.
@@ -52,26 +148,68 @@ function formatJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
-// App renders the Day 5 React flow for generic submit and status tracking.
+// App wires Apollo GraphQL client setup and renders the Week 2 console.
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:8080");
+  const resolvedApiUrl = useMemo(() => normalizeApiBaseUrl(apiBaseUrl), [apiBaseUrl]);
+
+  const apolloBundle = useMemo(() => createApolloBundle(resolvedApiUrl), [resolvedApiUrl]);
+
+  useEffect(
+    () => () => {
+      apolloBundle.dispose();
+    },
+    [apolloBundle]
+  );
+
+  return (
+    <ApolloProvider client={apolloBundle.client}>
+      <GraphQLConsole
+        apiBaseUrl={apiBaseUrl}
+        onApiBaseUrlChange={setApiBaseUrl}
+        resolvedApiUrl={resolvedApiUrl}
+      />
+    </ApolloProvider>
+  );
+}
+
+// GraphQLConsole renders submit/status UX backed by Apollo operations and subscriptions.
+function GraphQLConsole({ apiBaseUrl, onApiBaseUrlChange, resolvedApiUrl }) {
   const [jobType, setJobType] = useState("weather");
   const [payloadText, setPayloadText] = useState(createDefaultPayload("weather"));
 
-  const [submitLoading, setSubmitLoading] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [submitResponse, setSubmitResponse] = useState(null);
 
   const [statusJobId, setStatusJobId] = useState("");
-  const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [statusResponse, setStatusResponse] = useState(null);
 
-  const [pollingEnabled, setPollingEnabled] = useState(true);
-  const [pollIntervalMs, setPollIntervalMs] = useState(2000);
+  const [submitJob, { loading: submitLoading }] = useMutation(SUBMIT_JOB_MUTATION);
+  const [fetchStatus, { loading: statusLoading }] = useLazyQuery(JOB_STATUS_QUERY);
 
-  // resolvedApiUrl stores one normalized base URL for submit/status requests.
-  const resolvedApiUrl = useMemo(() => normalizeApiBaseUrl(apiBaseUrl), [apiBaseUrl]);
+  const liveJobId = statusJobId.trim();
+  const {
+    data: subscriptionData,
+    error: subscriptionError,
+    loading: subscriptionLoading,
+  } = useSubscription(JOB_PROGRESS_SUBSCRIPTION, {
+    variables: { jobId: liveJobId },
+    skip: liveJobId.length === 0,
+  });
+
+  useEffect(() => {
+    if (subscriptionData?.jobProgress) {
+      setStatusError("");
+      setStatusResponse(subscriptionData.jobProgress);
+    }
+  }, [subscriptionData]);
+
+  useEffect(() => {
+    if (subscriptionError) {
+      setStatusError(subscriptionError.message);
+    }
+  }, [subscriptionError]);
 
   // handleJobTypeChange swaps job type and resets payload to a matching template.
   const handleJobTypeChange = useCallback((nextJobType) => {
@@ -88,62 +226,47 @@ export default function App() {
     setSubmitError("");
   }, [jobType]);
 
-  // requestJobStatus calls GET /v1/jobs/{job_id}/status and updates UI state.
+  // requestJobStatus performs one GraphQL jobStatus query.
   const requestJobStatus = useCallback(
     async (jobIdToCheck, source) => {
       const cleanJobId = String(jobIdToCheck || "").trim();
       if (!cleanJobId) {
-        setStatusError("job_id is required for status check");
+        setStatusError("jobId is required for status check");
         return null;
       }
 
-      setStatusLoading(true);
       setStatusError("");
-      console.info("ui status request started", { jobId: cleanJobId, source });
+      console.info("ui graphql jobStatus query started", { jobId: cleanJobId, source });
 
       try {
-        const response = await fetch(`${resolvedApiUrl}/v1/jobs/${cleanJobId}/status`, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        });
-
-        const data = await response.json().catch(() => ({}));
-        if (response.status === 404) {
-          console.warn("ui status request returned not_found", { jobId: cleanJobId, source });
-          setStatusResponse(data);
-          return data;
-        }
-        if (!response.ok) {
-          const detail = data?.error || `status request failed with HTTP ${response.status}`;
-          throw new Error(detail);
+        const result = await fetchStatus({ variables: { jobId: cleanJobId } });
+        const status = result.data?.jobStatus;
+        if (!status) {
+          throw new Error("jobStatus response was empty");
         }
 
-        console.info("ui status request succeeded", {
+        setStatusResponse(status);
+        console.info("ui graphql jobStatus query succeeded", {
           jobId: cleanJobId,
-          state: data?.state,
-          progress: data?.progress_percent,
+          state: status.state,
+          progress: status.progressPercent,
           source,
         });
-        setStatusResponse(data);
-        return data;
+        return status;
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown status request error";
-        console.error("ui status request failed", { jobId: cleanJobId, source, error: message });
+        console.error("ui graphql jobStatus query failed", { jobId: cleanJobId, source, error: message });
         setStatusError(message);
         return null;
-      } finally {
-        setStatusLoading(false);
       }
     },
-    [resolvedApiUrl]
+    [fetchStatus]
   );
 
-  // handleSubmitJob sends generic POST /v1/jobs and preloads status tracking state.
+  // handleSubmitJob sends GraphQL submitJob mutation and starts live subscription tracking.
   const handleSubmitJob = useCallback(
     async (event) => {
       event.preventDefault();
-
-      setSubmitLoading(true);
       setSubmitError("");
       setSubmitResponse(null);
 
@@ -152,85 +275,49 @@ export default function App() {
         payloadObject = parsePayloadJSON(payloadText);
       } catch (error) {
         const message = error instanceof Error ? error.message : "invalid payload";
-        console.warn("ui submit validation failed", { error: message });
         setSubmitError(message);
-        setSubmitLoading(false);
         return;
       }
 
-      const body = { job_type: jobType, payload: payloadObject };
-      console.info("ui submit request started", { jobType, apiBaseUrl: resolvedApiUrl });
+      console.info("ui graphql submitJob mutation started", { jobType, apiBaseUrl: resolvedApiUrl });
 
       try {
-        const response = await fetch(`${resolvedApiUrl}/v1/jobs`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify(body),
+        const result = await submitJob({
+          variables: {
+            input: {
+              jobType,
+              payload: payloadObject,
+            },
+          },
         });
 
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const detail = data?.error || `submit failed with HTTP ${response.status}`;
-          throw new Error(detail);
+        const submit = result.data?.submitJob;
+        if (!submit) {
+          throw new Error("submitJob response was empty");
         }
 
-        console.info("ui submit request succeeded", { jobId: data?.job_id, jobType });
-        setSubmitResponse(data);
-        if (data?.job_id) {
-          setStatusJobId(data.job_id);
-          setPollingEnabled(true);
-          await requestJobStatus(data.job_id, "post-submit");
+        setSubmitResponse(submit);
+        if (submit.jobId) {
+          setStatusJobId(submit.jobId);
+          await requestJobStatus(submit.jobId, "post-submit");
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown submit error";
-        console.error("ui submit request failed", { jobType, error: message });
+        console.error("ui graphql submitJob mutation failed", { jobType, error: message });
         setSubmitError(message);
-      } finally {
-        setSubmitLoading(false);
       }
     },
-    [jobType, payloadText, requestJobStatus, resolvedApiUrl]
+    [jobType, payloadText, requestJobStatus, resolvedApiUrl, submitJob]
   );
 
-  // handleCheckStatus performs one manual status lookup for the provided job ID.
+  // handleCheckStatus performs one manual jobStatus query for the selected job ID.
   const handleCheckStatus = useCallback(() => {
     requestJobStatus(statusJobId, "manual");
   }, [requestJobStatus, statusJobId]);
 
-  // useEffect starts/stops polling while tracking a selected job ID.
-  useEffect(() => {
-    if (!pollingEnabled || !statusJobId.trim()) {
-      return undefined;
-    }
-    if (pollIntervalMs < 1000) {
-      return undefined;
-    }
-
-    console.info("ui polling started", {
-      jobId: statusJobId.trim(),
-      intervalMs: pollIntervalMs,
-    });
-
-    const intervalId = window.setInterval(async () => {
-      const latest = await requestJobStatus(statusJobId, "poll");
-      if (isTerminalState(latest?.state)) {
-        console.info("ui polling stopped after terminal state", {
-          jobId: statusJobId.trim(),
-          state: latest?.state,
-        });
-        setPollingEnabled(false);
-      }
-    }, pollIntervalMs);
-
-    return () => {
-      console.info("ui polling cleared", { jobId: statusJobId.trim() });
-      window.clearInterval(intervalId);
-    };
-  }, [pollingEnabled, pollIntervalMs, requestJobStatus, statusJobId]);
-
   // progressPercent normalizes displayed progress to a bounded integer.
   const progressPercent = useMemo(() => {
-    const raw = Number(statusResponse?.progress_percent || 0);
+    const raw = Number(statusResponse?.progressPercent || 0);
     if (Number.isNaN(raw)) {
       return 0;
     }
@@ -244,9 +331,10 @@ export default function App() {
 
       <header className="hero">
         <p className="eyebrow">Distributed Task Queue</p>
-        <h1>Job Control Console</h1>
+        <h1>GraphQL Operations Console</h1>
         <p className="hero-copy">
-          Submit generic jobs through the Week 1 API, then monitor state and progress in near real time.
+          Submit jobs via GraphQL mutation, query current status, and stream live progress through WebSocket
+          subscriptions.
         </p>
       </header>
 
@@ -256,10 +344,11 @@ export default function App() {
           <span>API base URL</span>
           <input
             value={apiBaseUrl}
-            onChange={(event) => setApiBaseUrl(event.target.value)}
+            onChange={(event) => onApiBaseUrlChange(event.target.value)}
             placeholder="http://localhost:8080"
           />
         </label>
+        <p className="muted">GraphQL HTTP: {resolvedApiUrl}/graphql | WebSocket: {toWebSocketUrl(resolvedApiUrl)}</p>
       </section>
 
       <section className="panel">
@@ -307,18 +396,7 @@ export default function App() {
             <input
               value={statusJobId}
               onChange={(event) => setStatusJobId(event.target.value)}
-              placeholder="Paste job_id to check status"
-            />
-          </label>
-
-          <label className="field">
-            <span>Poll interval (ms)</span>
-            <input
-              type="number"
-              min="1000"
-              step="500"
-              value={pollIntervalMs}
-              onChange={(event) => setPollIntervalMs(Number(event.target.value))}
+              placeholder="Paste jobId to query and subscribe"
             />
           </label>
         </div>
@@ -327,13 +405,12 @@ export default function App() {
           <button type="button" onClick={handleCheckStatus} disabled={statusLoading}>
             {statusLoading ? "Checking..." : "Check Status"}
           </button>
-          <button type="button" className="button-ghost" onClick={() => setPollingEnabled((prev) => !prev)}>
-            {pollingEnabled ? "Pause Polling" : "Resume Polling"}
-          </button>
         </div>
 
         <p className="muted">
-          Polling is <strong>{pollingEnabled ? "enabled" : "paused"}</strong>. It auto-stops on terminal states.
+          Live subscription: <strong>{liveJobId ? (subscriptionLoading ? "connecting" : "active") : "idle"}</strong>.
+          {" "}
+          Updates stop automatically on terminal states.
         </p>
 
         {statusError ? <p className="alert alert-error">{statusError}</p> : null}
@@ -344,8 +421,8 @@ export default function App() {
               <div className="progress-bar" style={{ width: `${progressPercent}%` }} />
             </div>
             <p className="muted progress-label">
-              State: <strong>{statusResponse.state || "unknown"}</strong> | Progress:{" "}
-              <strong>{progressPercent}%</strong>
+              State: <strong>{statusResponse.state || "unknown"}</strong> | Progress: <strong>{progressPercent}%</strong>
+              {isTerminalState(statusResponse.state) ? " | Terminal" : ""}
             </p>
 
             <article className="json-card">

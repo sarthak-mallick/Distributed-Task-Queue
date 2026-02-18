@@ -1,28 +1,21 @@
-# Worker Service (Week 1)
+# Worker Service (Week 2)
 
-Go worker service for Week 1.
+Go worker service for Week 2 migration.
 
-Current implementation scope (worker-side `W1-008` to `W1-014`):
+Current implementation scope:
 - Consumes Kafka jobs using a consumer group
-- Routes messages by `job_type` (weather profile first, extensible handlers)
-- Uses manual offset commits (`FetchMessage` + `CommitMessages`)
-- Commits only after processing outcome:
-  - success: commit
-  - invalid/unsupported message: drop + commit
-  - handler error: no commit (message can retry)
-- Writes Redis progress/status updates for milestones:
-  - `running:20` -> `running:50` -> `running:80` -> `completed:100`
-- Processes weather jobs using provider abstraction (`openmeteo` or `mock`)
-- Persists final results idempotently in MongoDB `job_results` (unique `job_id`)
-- Handles RabbitMQ progress request-reply on `progress.check.request.v1` with AMQP `correlation_id` echo and `reply_to` routing
-- Retries transient weather-provider failures with configurable exponential backoff
-- Reconnects RabbitMQ progress responder sessions after channel/consume failures
+- Processes weather jobs (plus generic non-weather placeholders)
+- Maintains Redis progress milestones and Mongo durable results
+- Serves RabbitMQ request-reply progress path (Week 1 compatibility)
+- Serves Week 2 gRPC API-worker contract:
+  - `GetJobStatus`
+  - `SubscribeJobProgress`
+- Retries transient weather provider failures with exponential backoff
 
 ## Run Locally
 
 ```bash
 cd worker
-go mod tidy
 go test ./...
 go run .
 ```
@@ -54,6 +47,8 @@ go run .
 - `RABBITMQ_PROGRESS_CONSUMER_TAG` (default: `dtq-worker-progress-v1`)
 - `RABBITMQ_PROGRESS_PREFETCH` (default: `20`)
 - `RABBITMQ_PROGRESS_RECONNECT_BACKOFF` (default: `2s`)
+- `WORKER_GRPC_ADDR` (default: `:9090`)
+- `WORKER_GRPC_POLL_INTERVAL` (default: `750ms`)
 - `WEATHER_PROVIDER` (`openmeteo` or `mock`, default: `openmeteo`)
 - `WEATHER_HTTP_TIMEOUT` (default: `8s`)
 - `WEATHER_USE_MOCK_FALLBACK` (default: `true`)

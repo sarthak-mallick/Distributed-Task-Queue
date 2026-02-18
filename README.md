@@ -2,7 +2,7 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor real-time progress.
 
-## Current Runbook (Completed Through Day 6)
+## Current Runbook (Completed Through Day 7)
 This runbook reflects the latest completed implementation slice and supersedes prior day-specific steps.
 
 Prerequisites:
@@ -10,7 +10,7 @@ Prerequisites:
 - Go toolchain installed (Go 1.22+)
 - Node.js + npm installed (Node 20+ recommended)
 
-### 1) Start Infra + Verify Connectivity
+### 1) Start Infra + Verify Connectivity + Canonical Kafka Topics
 ```bash
 bash infra/compose/scripts/bootstrap-and-smoke.sh
 ```
@@ -43,17 +43,18 @@ Open `http://localhost:5173`.
 3. Confirm status tracker progresses to `completed` with `100%`.
 4. Optionally paste any `job_id` into status tracker and check/poll manually.
 
-### 6) Optional Backend Automation Check
-Use this to re-run backend end-to-end validation from one command:
+### 6) Full Automated Validation (Recommended)
+Use this to run the full current end-to-end path (backend + UI checks) and purge volumes at teardown:
 ```bash
-bash scripts/run-current-e2e.sh
+bash scripts/run-current-e2e.sh --with-ui-checks --purge
 ```
 
 Optional flags:
+- run backend-only checks: `bash scripts/run-current-e2e.sh`
 - keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
 - skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
 - include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
-- teardown with volume cleanup: `bash scripts/run-current-e2e.sh --purge`
+- purge compose volumes at teardown: `bash scripts/run-current-e2e.sh --purge`
 
 ### 7) Teardown
 ```bash

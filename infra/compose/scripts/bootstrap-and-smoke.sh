@@ -13,6 +13,6 @@ fi
 
 docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d
 bash "${ROOT_DIR}/scripts/smoke-connectivity.sh"
+bash "${ROOT_DIR}/scripts/ensure-kafka-topics.sh"
 
-echo "Day 1 bootstrap and smoke checks passed."
-
+echo "Bootstrap, smoke checks, and Kafka topic bootstrap passed."

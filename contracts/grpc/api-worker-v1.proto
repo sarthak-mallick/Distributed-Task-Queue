@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package dtq.v1;
+
+option go_package = "distributed-task-queue/contracts/grpc;apiworkerpb";
+
+// APIWorker defines Week 2 API-worker status/progress RPC contracts.
+service APIWorker {
+  // GetJobStatus returns the latest known job status projection.
+  rpc GetJobStatus(GetJobStatusRequest) returns (JobStatusReply);
+
+  // SubscribeJobProgress streams status updates until a terminal state.
+  rpc SubscribeJobProgress(SubscribeJobProgressRequest) returns (stream JobStatusReply);
+}
+
+// GetJobStatusRequest queries status for one job_id.
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+// SubscribeJobProgressRequest starts a stream for one job_id.
+message SubscribeJobProgressRequest {
+  string job_id = 1;
+  int32 poll_interval_ms = 2;
+}
+
+// JobStatusReply mirrors Week 1 canonical progress reply fields.
+message JobStatusReply {
+  string job_id = 1;
+  string state = 2;
+  int32 progress_percent = 3;
+  string message = 4;
+  string timestamp = 5;
+}

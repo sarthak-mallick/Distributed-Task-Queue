@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"distributed-task-queue/worker/internal/apiworkergrpc"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -323,6 +324,72 @@ func TestHandleWeatherJobSkipsRetryForNonRetryableError(t *testing.T) {
 	}
 	if weather.calls != 1 {
 		t.Fatalf("weather calls = %d, want 1", weather.calls)
+	}
+}
+
+// TestGetJobStatusValidation verifies request validation for worker gRPC status RPC.
+func TestGetJobStatusValidation(t *testing.T) {
+	t.Parallel()
+
+	w := &worker{}
+	if _, err := w.GetJobStatus(context.Background(), nil); err == nil {
+		t.Fatalf("GetJobStatus(nil) error = nil, want non-nil")
+	}
+	if _, err := w.GetJobStatus(context.Background(), &apiworkergrpc.GetJobStatusRequest{}); err == nil {
+		t.Fatalf("GetJobStatus(empty job_id) error = nil, want non-nil")
+	}
+}
+
+// TestSubscribeJobProgressValidation verifies request validation for gRPC stream setup.
+func TestSubscribeJobProgressValidation(t *testing.T) {
+	t.Parallel()
+
+	w := &worker{}
+	if err := w.SubscribeJobProgress(nil, nil); err == nil {
+		t.Fatalf("SubscribeJobProgress(nil) error = nil, want non-nil")
+	}
+	if err := w.SubscribeJobProgress(&apiworkergrpc.SubscribeJobProgressRequest{}, nil); err == nil {
+		t.Fatalf("SubscribeJobProgress(empty job_id) error = nil, want non-nil")
+	}
+}
+
+// TestProgressReplyToGRPC verifies field mapping into the gRPC response shape.
+func TestProgressReplyToGRPC(t *testing.T) {
+	t.Parallel()
+
+	out := progressReplyToGRPC(progressCheckReply{
+		JobID:           "job-1",
+		State:           "running",
+		ProgressPercent: 80,
+		Message:         "persisting final result",
+		Timestamp:       "2026-02-18T01:00:00Z",
+	})
+	if out.JobID != "job-1" || out.State != "running" || out.ProgressPercent != 80 {
+		t.Fatalf("progressReplyToGRPC() returned unexpected mapping: %+v", out)
+	}
+}
+
+// TestIsTerminalJobState verifies terminal-state detection for gRPC stream completion.
+func TestIsTerminalJobState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state string
+		want  bool
+	}{
+		{state: "completed", want: true},
+		{state: "failed", want: true},
+		{state: "not_found", want: true},
+		{state: "running", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.state, func(t *testing.T) {
+			t.Parallel()
+			if got := isTerminalJobState(tt.state); got != tt.want {
+				t.Fatalf("isTerminalJobState(%q) = %t, want %t", tt.state, got, tt.want)
+			}
+		})
 	}
 }
 

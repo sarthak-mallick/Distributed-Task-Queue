@@ -325,7 +325,7 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-14: Added Day 2 API validation commands to `README.md` (compile/test/run + Redis/Kafka verification path).
 - 2026-02-14: Consolidated `README.md` into a single cumulative runbook (completed-through-Day-2) and removed day-split instructions.
 - 2026-02-14: Added explicit agent policy/workflow rule: README must always keep only current Day N cumulative setup/test instructions and remove Day (N-1) sections.
-- 2026-02-14: Added explicit policy/workflow rule: execute one task ID at a time (no auto-batching all tasks for a day) unless user explicitly requests batching.
+- 2026-02-14: Added explicit policy/workflow rule for one-task-at-a-time execution (later superseded on 2026-02-18 by default batching policy in `docs/agent/workflow.md`).
 - 2026-02-14: Updated `api/main.go` with function-level comments + logging coverage and added policy rule requiring comments/logging for new or modified functions.
 - 2026-02-14: Generalized remaining docs/readmes to job-type-first wording; kept weather as initial test profile example only.
 - 2026-02-14: Updated README Kafka verification command to use `--from-beginning` so manual checks can validate previously submitted messages without timing windows.
@@ -355,6 +355,7 @@ Use the canonical format in `docs/agent/handoff-template.md` and avoid repeating
 - 2026-02-18: Started W1-015 and added Day-7 reliability hardening by pre-creating canonical Kafka topics in infra bootstrap (`ensure-kafka-topics.sh` wired into `bootstrap-and-smoke.sh`).
 - 2026-02-18: Updated Day-7 cumulative runbooks (`README.md`, `infra/compose/README.md`, `.env.example`) with canonical topic bootstrap and final validation command (`run-current-e2e.sh --with-ui-checks --purge`).
 - 2026-02-18: Completed Day-7 validation rehearsal: `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (UI build, infra smoke, API/worker unit tests, submit/status, Redis/Mongo/Kafka checks, teardown with volume purge).
+- 2026-02-18: Updated agent workflow policy to allow batching task IDs by default and require step-by-step pauses only when explicitly requested by user.
 
 ## Handoff Snapshot
 

@@ -1,11 +1,12 @@
-# API Service (Week 1)
+# API Service (Week 2)
 
-Temporary Go REST API for Week 1.
+Go API for Week 2 GraphQL and gRPC-integrated flow.
 
-Implemented Day 4 endpoints:
-- `POST /v1/jobs` (generic)
+Implemented surface:
+- `POST /graphql` (GraphQL mutation/query)
+- `GET /graphql/ws` (GraphQL subscriptions over `graphql-transport-ws`)
 - `GET /healthz`
-- `GET /v1/jobs/{job_id}/status` (RabbitMQ request-reply backed)
+- Legacy Week 1 REST job paths are disabled (`410 Gone`)
 
 ## Run
 
@@ -29,30 +30,35 @@ go run .
 - `RABBITMQ_URL` (default `amqp://guest:guest@localhost:5672/`)
 - `RABBITMQ_PROGRESS_REQUEST_QUEUE` (default `progress.check.request.v1`)
 - `PROGRESS_REPLY_TIMEOUT` (default `5s`)
+- `WORKER_GRPC_ADDR` (default `localhost:9090`)
+- `WORKER_GRPC_DIAL_TIMEOUT` (default `5s`)
+- `GRAPHQL_SUBSCRIPTION_POLL_INTERVAL` (default `750ms`)
 
-## Generic Submit Example
+## GraphQL Examples
+
+Submit mutation:
 
 ```bash
-curl -X POST http://localhost:8080/v1/jobs \
+curl -s -X POST http://localhost:8080/graphql \
   -H 'Content-Type: application/json' \
   -d '{
-    "job_type": "weather",
-    "payload": {
-      "city": "Austin",
-      "country_code": "US",
-      "units": "metric"
+    "query":"mutation SubmitJob($input: SubmitJobInput!){submitJob(input:$input){jobId state message}}",
+    "variables":{
+      "input":{
+        "jobType":"weather",
+        "payload":{"city":"Austin","country_code":"US","units":"metric"}
+      }
     }
   }'
 ```
 
-Currently supported `job_type` values:
-- `weather`
-- `quote`
-- `exchange_rate`
-- `github_user`
-
-## Status Example
+Status query:
 
 ```bash
-curl -s http://localhost:8080/v1/jobs/<job_id>/status | jq
+curl -s -X POST http://localhost:8080/graphql \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"query JobStatus($jobId: ID!){jobStatus(jobId:$jobId){jobId state progressPercent message timestamp}}",
+    "variables":{"jobId":"<job_id>"}
+  }'
 ```

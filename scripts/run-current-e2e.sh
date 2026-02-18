@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It isolates test traffic with a unique Kafka topic and RabbitMQ queue per run.
+# It isolates test traffic with a unique Kafka topic and validates Week 2 GraphQL + subscription behavior.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -41,7 +41,7 @@ Behavior:
   2) Optionally runs frontend build checks (`--with-ui-checks`).
   3) Runs api/worker unit tests (unless skipped).
   4) Starts API and worker with isolated topic/queue settings.
-  5) Submits a weather-profile job and validates status/Redis/Mongo/Kafka.
+  5) Submits a weather-profile job via GraphQL, validates subscription updates, and checks Redis/Mongo/Kafka.
   6) Tears down app processes and infra by default.
 EOF
 }
@@ -89,6 +89,7 @@ PROGRESS_CONSUMER_TAG="dtq-worker-progress-e2e-${RUN_ID}"
 API_PORT="${API_PORT:-18080}"
 API_ADDR=":${API_PORT}"
 API_BASE_URL="http://127.0.0.1:${API_PORT}"
+WORKER_GRPC_ADDR="${WORKER_GRPC_ADDR:-127.0.0.1:19090}"
 
 LOG_DIR="${ROOT_DIR}/.tmp/e2e/${RUN_ID}"
 mkdir -p "${LOG_DIR}"
@@ -117,6 +118,7 @@ preflight_checks() {
   require_command docker
   require_command go
   require_command curl
+  require_command node
   if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
     require_command npm
   fi
@@ -213,21 +215,137 @@ wait_for_api_health() {
   return 1
 }
 
-# wait_for_status_path waits until worker-backed status returns 404 for unknown jobs.
-wait_for_status_path() {
+# graphql_status_query executes GraphQL status query for one job_id and writes response body.
+graphql_status_query() {
+  local job_id="$1"
+  local out_file="$2"
+  local payload
+
+  payload="$(printf '{"query":"query JobStatus($jobId: ID!){jobStatus(jobId:$jobId){jobId state progressPercent message timestamp}}","variables":{"jobId":"%s"}}' "${job_id}")"
+  curl -s -o "${out_file}" -w '%{http_code}' \
+    -X POST "${API_BASE_URL}/graphql" \
+    -H 'Content-Type: application/json' \
+    -d "${payload}"
+}
+
+# wait_for_graphql_path waits until GraphQL query path responds with not_found for unknown jobs.
+wait_for_graphql_path() {
   local attempts=45
   local unknown_id="00000000-0000-0000-0000-000000000000"
   local code=""
   for ((i=1; i<=attempts; i++)); do
-    code="$(curl -s -o "${UNKNOWN_JSON}" -w '%{http_code}' "${API_BASE_URL}/v1/jobs/${unknown_id}/status" || true)"
-    if [[ "${code}" == "404" ]]; then
-      log "worker status request-reply is ready"
+    code="$(graphql_status_query "${unknown_id}" "${UNKNOWN_JSON}" || true)"
+    if [[ "${code}" == "200" ]] && grep -q '"state":"not_found"' "${UNKNOWN_JSON}"; then
+      log "graphql query path is ready"
       return 0
     fi
     sleep 1
   done
-  log "status request-reply path did not become ready in time"
+  log "graphql query path did not become ready in time"
   return 1
+}
+
+# run_graphql_subscription_check validates GraphQL websocket subscription delivery through terminal state.
+run_graphql_subscription_check() {
+  local job_id="$1"
+  API_BASE_URL="${API_BASE_URL}" JOB_ID="${job_id}" node <<'NODE'
+const apiBaseUrl = process.env.API_BASE_URL;
+const jobId = process.env.JOB_ID;
+
+if (!apiBaseUrl || !jobId) {
+  console.error("missing API_BASE_URL or JOB_ID");
+  process.exit(1);
+}
+if (typeof WebSocket === "undefined") {
+  console.error("node runtime does not expose global WebSocket");
+  process.exit(1);
+}
+
+const wsUrl = apiBaseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/graphql/ws";
+const ws = new WebSocket(wsUrl, "graphql-transport-ws");
+
+let acked = false;
+let events = 0;
+let completed = false;
+
+const timeout = setTimeout(() => {
+  console.error("subscription timed out without terminal event");
+  process.exit(1);
+}, 30000);
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: "connection_init" }));
+};
+
+ws.onmessage = (event) => {
+  let message;
+  try {
+    message = JSON.parse(String(event.data));
+  } catch (err) {
+    console.error("subscription received invalid JSON:", err);
+    process.exit(1);
+  }
+
+  if (message.type === "connection_ack") {
+    acked = true;
+    ws.send(
+      JSON.stringify({
+        id: "job-progress-check",
+        type: "subscribe",
+        payload: {
+          query:
+            "subscription JobProgress($jobId: ID!){jobProgress(jobId:$jobId){jobId state progressPercent message timestamp}}",
+          variables: { jobId },
+        },
+      })
+    );
+    return;
+  }
+
+  if (message.type === "next") {
+    const progress = message?.payload?.data?.jobProgress;
+    if (!progress) {
+      console.error("subscription next payload missing data.jobProgress");
+      process.exit(1);
+    }
+    events += 1;
+    if (["completed", "failed", "not_found"].includes(String(progress.state || "").toLowerCase())) {
+      completed = true;
+      ws.send(JSON.stringify({ id: "job-progress-check", type: "complete" }));
+      ws.close();
+    }
+    return;
+  }
+
+  if (message.type === "error") {
+    console.error("subscription protocol error:", JSON.stringify(message.payload));
+    process.exit(1);
+  }
+
+  if (message.type === "complete" && completed && events > 0) {
+    clearTimeout(timeout);
+    process.exit(0);
+  }
+};
+
+ws.onclose = () => {
+  if (!acked) {
+    console.error("subscription socket closed before connection_ack");
+    process.exit(1);
+  }
+  if (!completed || events === 0) {
+    console.error("subscription closed before terminal status event");
+    process.exit(1);
+  }
+  clearTimeout(timeout);
+  process.exit(0);
+};
+
+ws.onerror = (event) => {
+  console.error("subscription websocket error", event?.message || "");
+  process.exit(1);
+};
+NODE
 }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -277,7 +395,10 @@ log "starting api process"
   cd "${API_DIR}"
   API_ADDR="${API_ADDR}" \
   KAFKA_TOPIC="${TOPIC}" \
+  REDIS_ADDR="127.0.0.1:6379" \
+  RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/" \
   RABBITMQ_PROGRESS_REQUEST_QUEUE="${PROGRESS_QUEUE}" \
+  WORKER_GRPC_ADDR="${WORKER_GRPC_ADDR}" \
   go run . >"${API_LOG}" 2>&1
 ) &
 API_PID="$!"
@@ -287,30 +408,35 @@ log "starting worker process"
   cd "${WORKER_DIR}"
   WORKER_KAFKA_TOPIC="${TOPIC}" \
   WORKER_KAFKA_GROUP_ID="${WORKER_GROUP_ID}" \
+  REDIS_ADDR="127.0.0.1:6379" \
+  MONGO_URI="mongodb://127.0.0.1:27017" \
+  RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5672/" \
   RABBITMQ_PROGRESS_REQUEST_QUEUE="${PROGRESS_QUEUE}" \
   RABBITMQ_PROGRESS_CONSUMER_TAG="${PROGRESS_CONSUMER_TAG}" \
+  WORKER_GRPC_ADDR="${WORKER_GRPC_ADDR}" \
   WEATHER_PROVIDER="mock" \
   go run . >"${WORKER_LOG}" 2>&1
 ) &
 WORKER_PID="$!"
 
 wait_for_api_health
-wait_for_status_path
+wait_for_graphql_path
 
-log "submitting test job"
+log "submitting test job via graphql mutation"
+submit_payload='{"query":"mutation SubmitJob($input: SubmitJobInput!){submitJob(input:$input){jobId traceId jobType state submittedAt message}}","variables":{"input":{"jobType":"weather","payload":{"city":"Austin","country_code":"US","units":"metric"}}}}'
 submit_code="$(
   curl -s -o "${SUBMIT_JSON}" -w '%{http_code}' \
-    -X POST "${API_BASE_URL}/v1/jobs" \
+    -X POST "${API_BASE_URL}/graphql" \
     -H 'Content-Type: application/json' \
-    -d '{"job_type":"weather","payload":{"city":"Austin","country_code":"US","units":"metric"}}'
+    -d "${submit_payload}"
 )"
-if [[ "${submit_code}" != "202" ]]; then
+if [[ "${submit_code}" != "200" ]]; then
   log "job submit failed with http=${submit_code}"
   cat "${SUBMIT_JSON}"
   exit 1
 fi
 
-JOB_ID="$(sed -nE 's/.*"job_id":"([^"]+)".*/\1/p' "${SUBMIT_JSON}")"
+JOB_ID="$(sed -nE 's/.*"jobId":"([^"]+)".*/\1/p' "${SUBMIT_JSON}")"
 if [[ -z "${JOB_ID}" ]]; then
   log "could not parse job_id from submit response"
   cat "${SUBMIT_JSON}"
@@ -318,33 +444,31 @@ if [[ -z "${JOB_ID}" ]]; then
 fi
 log "submitted job_id=${JOB_ID}"
 
-final_state=""
-final_progress=""
-for ((i=1; i<=60; i++)); do
-  status_code="$(curl -s -o "${STATUS_JSON}" -w '%{http_code}' "${API_BASE_URL}/v1/jobs/${JOB_ID}/status" || true)"
-  if [[ "${status_code}" == "200" ]]; then
-    final_state="$(sed -nE 's/.*"state":"([^"]+)".*/\1/p' "${STATUS_JSON}")"
-    final_progress="$(sed -nE 's/.*"progress_percent":([0-9]+).*/\1/p' "${STATUS_JSON}")"
-    log "status poll attempt=${i} state=${final_state:-unknown} progress=${final_progress:-unknown}"
-    if [[ "${final_state}" == "completed" && "${final_progress}" == "100" ]]; then
-      break
-    fi
-  fi
-  sleep 1
-done
-
-if [[ "${final_state}" != "completed" || "${final_progress}" != "100" ]]; then
-  log "job did not reach completed state in time"
-  cat "${STATUS_JSON}" 2>/dev/null || true
+log "validating graphql subscription progress stream"
+if ! run_graphql_subscription_check "${JOB_ID}"; then
+  log "graphql subscription check failed"
   exit 1
 fi
 
-unknown_code="$(
-  curl -s -o "${UNKNOWN_JSON}" -w '%{http_code}' \
-    "${API_BASE_URL}/v1/jobs/00000000-0000-0000-0000-000000000000/status"
-)"
-if [[ "${unknown_code}" != "404" ]]; then
-  log "expected unknown job status to return 404, got ${unknown_code}"
+log "querying final status via graphql"
+status_code="$(graphql_status_query "${JOB_ID}" "${STATUS_JSON}" || true)"
+if [[ "${status_code}" != "200" ]]; then
+  log "graphql status query failed with http=${status_code}"
+  cat "${STATUS_JSON}"
+  exit 1
+fi
+
+final_state="$(sed -nE 's/.*"state":"([^"]+)".*/\1/p' "${STATUS_JSON}")"
+final_progress="$(sed -nE 's/.*"progressPercent":([0-9]+).*/\1/p' "${STATUS_JSON}")"
+if [[ "${final_state}" != "completed" || "${final_progress}" != "100" ]]; then
+  log "graphql status validation failed state=${final_state:-unknown} progress=${final_progress:-unknown}"
+  cat "${STATUS_JSON}"
+  exit 1
+fi
+
+unknown_code="$(graphql_status_query "00000000-0000-0000-0000-000000000000" "${UNKNOWN_JSON}" || true)"
+if [[ "${unknown_code}" != "200" ]] || ! grep -q '"state":"not_found"' "${UNKNOWN_JSON}"; then
+  log "expected unknown job graphql query to return state=not_found, got http=${unknown_code}"
   cat "${UNKNOWN_JSON}"
   exit 1
 fi

@@ -35,8 +35,8 @@ Question style:
 - Use the active week file as the live source for task status.
 - Do not create separate status files unless requested.
 - Keep changes incremental and tied to specific task IDs.
-- Execute one task ID at a time (for example, `W1-008` only), then pause for review/confirmation before starting the next task ID.
-- Do not batch all tasks for a day in one pass unless the user explicitly asks to batch them.
+- Batching is allowed by default when it improves delivery speed (for example, completing multiple tasks for a day in one pass).
+- Pause between task IDs only when the user explicitly asks for step-by-step review checkpoints.
 - Code comments/logging rule: every new or modified function must include a short purpose comment and meaningful logging for key transitions and error paths (avoid noisy per-line logs).
 
 ## 4) Week Status Update Rules

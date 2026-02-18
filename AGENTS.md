@@ -29,7 +29,7 @@ If there is any conflict:
   Keep exactly one execution file per active week (`docs/week-1-execution.md`, `docs/week-2-execution.md`, etc.).
   Update that file's live status sections before closing a thread.
 - Workflow authority discipline:
-  Treat `docs/agent/workflow.md` as the canonical location for execution-level rules (single-task sequencing, code observability, README/runbook maintenance, current E2E runner maintenance, and context hygiene).
+  Treat `docs/agent/workflow.md` as the canonical location for execution-level rules (task sequencing and batching preferences, code observability, README/runbook maintenance, current E2E runner maintenance, and context hygiene).
   Avoid duplicating those detailed rules in `AGENTS.md`.
 
 ## Thread Start Reference

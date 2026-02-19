@@ -50,10 +50,10 @@ Update this table continuously during Week 3 execution.
 |----|--------|--------------|-------|
 | W3-001 | Completed | 2026-02-19 | Added Week 3 scaffold structure: `infra/azure/ansible`, `infra/aks`, `Jenkinsfile`, and active execution file. |
 | W3-002 | Completed | 2026-02-19 | Added Azure variable contract template + Day 12 preflight validation playbook. |
-| W3-003 | In Progress | 2026-02-19 | Added initial AKS base manifests and kustomization scaffold; deeper service/config coverage pending. |
+| W3-003 | Completed | 2026-02-19 | Added Day 13 AKS manifest baseline depth: config/secret wiring, worker gRPC service, and deployment env/probe contract checks. |
 | W3-004 | In Progress | 2026-02-19 | Added Jenkins pipeline stage scaffold; runtime Docker/push/deploy commands still placeholder TODOs. |
 | W3-005 | Pending | 2026-02-19 | Planned for mid-week CI/CD wiring. |
-| W3-006 | In Progress | 2026-02-19 | Integrated Day 12 local scaffold checks into canonical `scripts/run-current-e2e.sh` and aligned README runbook. |
+| W3-006 | In Progress | 2026-02-19 | Integrated Day 13 AKS manifest checks into canonical `scripts/run-current-e2e.sh` and aligned README runbook. |
 
 ## Implementation Order
 
@@ -101,11 +101,14 @@ Update this table continuously during Week 3 execution.
 - 2026-02-19: Validation check results: `kubectl kustomize infra/aks/base` passed; Ansible syntax check skipped locally (`ansible-playbook` unavailable).
 - 2026-02-19: Updated canonical `scripts/run-current-e2e.sh` to include Week 3 Day 12 scaffold checks (Jenkinsfile, AKS kustomize, Ansible preflight when available); updated README accordingly.
 - 2026-02-19: Revalidated canonical runner after Week 3 check integration (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --purge`) with all runtime checks passing.
+- 2026-02-19: Completed Day 13 AKS manifest baseline (`W3-003`) with `dtq-api-config`, `dtq-worker-config`, `dtq-runtime-secrets`, `dtq-worker-grpc`, and API/worker env wiring updates.
+- 2026-02-19: Updated canonical `scripts/run-current-e2e.sh` and `README.md` for Day 13 validation coverage (AKS render + manifest/env wiring assertions + Week 3 preflight).
+- 2026-02-19: Revalidated Day 13 cumulative flow with UI checks (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --with-ui-checks --purge`) and all checks passed.
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 12 started)
-- Completed tasks: W3-001, W3-002
-- In-progress tasks: W3-003, W3-004, W3-006
+- Week status: In progress (Day 13 completed)
+- Completed tasks: W3-001, W3-002, W3-003
+- In-progress tasks: W3-004, W3-006
 - Blockers: None
-- Next task: Finish W3-003 manifest depth and replace W3-004 pipeline TODO placeholders with executable build/push/deploy steps; then complete W3-005 image/tag contract wiring
+- Next task: Execute Day 14 (`W3-004`) by replacing Jenkins pipeline TODO placeholders with executable build/push/deploy steps, then wire W3-005 image/tag contract alignment.

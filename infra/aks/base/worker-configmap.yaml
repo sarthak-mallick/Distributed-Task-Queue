@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dtq-worker-config
+  labels:
+    app.kubernetes.io/name: dtq
+    app.kubernetes.io/component: worker
+data:
+  WORKER_KAFKA_BROKERS: "kafka.bootstrap:9092"
+  WORKER_KAFKA_GROUP_ID: "dtq-worker-v1"
+  WORKER_KAFKA_TOPIC_TEMPLATE: "jobs.%s.v1"
+  WORKER_JOB_TYPES: "weather,quote,exchange_rate,github_user"
+  WORKER_FETCH_MIN_BYTES: "1"
+  WORKER_FETCH_MAX_BYTES: "10485760"
+  WORKER_FETCH_MAX_WAIT: "1s"
+  WORKER_FETCH_ERROR_BACKOFF: "2s"
+  WORKER_PROCESS_TIMEOUT: "30s"
+  WORKER_COMMIT_TIMEOUT: "5s"
+  REDIS_ADDR: "redis.cache:6379"
+  REDIS_DB: "0"
+  MONGO_DB: "dtq"
+  MONGO_COLLECTION: "job_results"
+  MONGO_CONNECT_TIMEOUT: "10s"
+  RABBITMQ_PROGRESS_REQUEST_QUEUE: "progress.check.request.v1"
+  RABBITMQ_PROGRESS_CONSUMER_TAG: "dtq-worker-progress-v1"
+  RABBITMQ_PROGRESS_PREFETCH: "20"
+  RABBITMQ_PROGRESS_RECONNECT_BACKOFF: "2s"
+  WORKER_GRPC_POLL_INTERVAL: "750ms"
+  WEATHER_PROVIDER: "openmeteo"
+  WEATHER_HTTP_TIMEOUT: "5s"
+  WEATHER_GEOCODING_URL: "https://geocoding-api.open-meteo.com/v1/search"
+  WEATHER_FORECAST_URL: "https://api.open-meteo.com/v1/forecast"
+  WEATHER_USE_MOCK_FALLBACK: "true"
+  WEATHER_MAX_ATTEMPTS: "4"
+  WEATHER_RETRY_INITIAL_BACKOFF: "500ms"
+  WEATHER_RETRY_MAX_BACKOFF: "5s"

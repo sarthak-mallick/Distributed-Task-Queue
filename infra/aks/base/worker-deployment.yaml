@@ -20,6 +20,21 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: dtq-worker-config
+            - secretRef:
+                name: dtq-runtime-secrets
           env:
             - name: WORKER_GRPC_ADDR
               value: ":9090"
+          readinessProbe:
+            tcpSocket:
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 20

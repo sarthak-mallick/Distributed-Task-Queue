@@ -5,9 +5,13 @@ namespace: dtq
 
 resources:
   - namespace.yaml
+  - api-configmap.yaml
+  - worker-configmap.yaml
+  - runtime-secrets.yaml
   - api-deployment.yaml
   - api-service.yaml
   - worker-deployment.yaml
+  - worker-service.yaml
   - ui-deployment.yaml
   - ui-service.yaml
 

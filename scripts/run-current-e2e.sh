@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It validates Week 2 runtime behavior and Week 3 Day 12 cloud scaffolding checks.
+# It validates Week 2 runtime behavior and Week 3 Day 13 cloud scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -37,12 +37,12 @@ Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
-  --skip-week3-checks  Skip Week 3 Day 12 scaffold checks (Jenkinsfile/AKS/Ansible).
+  --skip-week3-checks  Skip Week 3 Day 13 scaffold checks (Jenkinsfile/AKS/Ansible).
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Validates Week 3 Day 12 scaffolding (Jenkinsfile stages, AKS kustomize render, Ansible preflight when installed).
+  1) Validates Week 3 Day 13 scaffolding (Jenkinsfile stages, AKS manifests/env wiring, Ansible preflight when installed).
   2) Starts compose infrastructure and smoke-checks it.
   3) Optionally runs frontend build checks (`--with-ui-checks`).
   4) Runs api/worker unit tests (unless skipped).
@@ -142,11 +142,17 @@ preflight_checks() {
   fi
 }
 
-# run_week3_day12_checks validates local cloud scaffolding introduced for Week 3.
-run_week3_day12_checks() {
+# run_week3_day13_checks validates local cloud scaffolding introduced for Week 3.
+run_week3_day13_checks() {
   local aks_render_file="${LOG_DIR}/aks-render.yaml"
   local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
   local temp_ssh_pub="${LOG_DIR}/jenkins-temp.pub"
+  local api_manifest="${AKS_BASE_DIR}/api-deployment.yaml"
+  local worker_manifest="${AKS_BASE_DIR}/worker-deployment.yaml"
+  local worker_service_manifest="${AKS_BASE_DIR}/worker-service.yaml"
+  local api_config_manifest="${AKS_BASE_DIR}/api-configmap.yaml"
+  local worker_config_manifest="${AKS_BASE_DIR}/worker-configmap.yaml"
+  local runtime_secret_manifest="${AKS_BASE_DIR}/runtime-secrets.yaml"
   local required_stage
 
   if [[ ! -f "${JENKINSFILE_PATH}" ]]; then
@@ -176,10 +182,44 @@ run_week3_day12_checks() {
     log "AKS render output missing expected Namespace/Deployment/Service resources"
     exit 1
   fi
-  log "aks kustomize render check passed"
+  for required_manifest in \
+    "${api_manifest}" \
+    "${worker_manifest}" \
+    "${worker_service_manifest}" \
+    "${api_config_manifest}" \
+    "${worker_config_manifest}" \
+    "${runtime_secret_manifest}"; do
+    if [[ ! -f "${required_manifest}" ]]; then
+      log "required Week 3 manifest is missing: ${required_manifest}"
+      exit 1
+    fi
+  done
+  for required_name in \
+    "name: dtq-api-config" \
+    "name: dtq-worker-config" \
+    "name: dtq-runtime-secrets" \
+    "name: dtq-worker-grpc"; do
+    if ! grep -q "${required_name}" "${aks_render_file}"; then
+      log "AKS render output missing required resource marker: ${required_name}"
+      exit 1
+    fi
+  done
+  if ! grep -q 'name: dtq-api-config' "${api_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${api_manifest}" || ! grep -q 'value: "dtq-worker-grpc:9090"' "${api_manifest}"; then
+    log "api deployment manifest is missing required env wiring references"
+    exit 1
+  fi
+  if ! grep -q 'name: dtq-worker-config' "${worker_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${worker_manifest}" || ! grep -q 'name: WORKER_GRPC_ADDR' "${worker_manifest}"; then
+    log "worker deployment manifest is missing required env wiring references"
+    exit 1
+  fi
+  if ! grep -q 'tcpSocket:' "${worker_manifest}"; then
+    log "worker deployment manifest is missing tcp liveness/readiness probes"
+    exit 1
+  fi
+  log "aks kustomize render and manifest wiring checks passed"
 
   if command -v ansible-playbook >/dev/null 2>&1; then
-    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY12ValidationKey local-test" >"${temp_ssh_pub}"
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY13ValidationKey local-test" >"${temp_ssh_pub}"
 
     cat >"${ansible_vars_file}" <<EOF
 azure_subscription_id: "00000000-0000-0000-0000-000000000000"
@@ -198,9 +238,9 @@ EOF
 
     ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" --syntax-check >/dev/null
     ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" -e "@${ansible_vars_file}" >/dev/null
-    log "ansible day12 preflight check passed"
+    log "ansible week3 preflight check passed"
   else
-    log "ansible-playbook not installed; skipping ansible day12 preflight check"
+    log "ansible-playbook not installed; skipping ansible week3 preflight check"
   fi
 }
 
@@ -431,8 +471,8 @@ fi
 preflight_checks
 
 if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
-  log "running week 3 day 12 scaffold checks"
-  run_week3_day12_checks
+  log "running week 3 day 13 scaffold checks"
+  run_week3_day13_checks
 else
   log "skipping week 3 checks (--skip-week3-checks)"
 fi

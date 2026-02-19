@@ -1,0 +1,57 @@
+---
+- name: Day 12 Week 3 Azure preflight validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    required_strings:
+      - azure_subscription_id
+      - azure_client_id
+      - azure_client_secret
+      - azure_tenant_id
+      - azure_location
+      - azure_resource_group
+      - azure_acr_name
+      - azure_aks_name
+      - azure_jenkins_vm_name
+      - azure_jenkins_admin_username
+      - azure_jenkins_ssh_public_key_path
+
+  tasks:
+    - name: Validate required string variables are set
+      ansible.builtin.assert:
+        that:
+          - vars[item] is defined
+          - vars[item] is string
+          - vars[item] | trim | length > 0
+        fail_msg: "Required variable '{{ item }}' is missing or empty"
+      loop: "{{ required_strings }}"
+
+    - name: Validate AKS node count is a positive integer
+      ansible.builtin.assert:
+        that:
+          - azure_aks_node_count is defined
+          - azure_aks_node_count | int >= 1
+        fail_msg: "azure_aks_node_count must be >= 1"
+
+    - name: Validate Jenkins SSH public key path exists locally
+      ansible.builtin.stat:
+        path: "{{ azure_jenkins_ssh_public_key_path }}"
+      register: jenkins_ssh_key
+
+    - name: Assert Jenkins SSH public key exists
+      ansible.builtin.assert:
+        that:
+          - jenkins_ssh_key.stat.exists
+        fail_msg: "Jenkins SSH public key file does not exist at {{ azure_jenkins_ssh_public_key_path }}"
+
+    - name: Report validated Week 3 cloud targets
+      ansible.builtin.debug:
+        msg:
+          - "Preflight validation passed"
+          - "resource_group={{ azure_resource_group }}"
+          - "location={{ azure_location }}"
+          - "acr={{ azure_acr_name }}"
+          - "aks={{ azure_aks_name }} nodes={{ azure_aks_node_count }}"
+          - "jenkins_vm={{ azure_jenkins_vm_name }}"

@@ -2,13 +2,15 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
 
-## Current Runbook (Completed Through Week 2 Day 9)
+## Current Runbook (Completed Through Week 3 Day 12)
 This runbook reflects the latest completed implementation slice and supersedes prior flow details.
 
 Prerequisites:
 - Docker Desktop (or Docker daemon) running
 - Go toolchain installed (Go 1.23+)
 - Node.js + npm installed (Node 20+ recommended)
+- `kubectl` installed (required for Week 3 Day 12 AKS manifest render validation)
+- `ansible-playbook` installed (optional: if unavailable, Day 12 Ansible preflight check is skipped with a log note)
 
 ### 1) Start Infra + Verify Connectivity + Canonical Kafka Topics
 ```bash
@@ -44,15 +46,27 @@ Open `http://localhost:5173`.
 4. Confirm final terminal state is `completed` with `100%` progress.
 
 ### 6) Full Automated Validation (Recommended)
-Use this to run the full current end-to-end flow (GraphQL mutation/query/subscription + Redis/Mongo/Kafka checks) and purge volumes at teardown:
+Use this to run the full current validation flow and purge volumes at teardown:
 ```bash
 bash scripts/run-current-e2e.sh --with-ui-checks --purge
 ```
+
+Current validation coverage in `run-current-e2e.sh`:
+- Week 3 Day 12 scaffold checks:
+  - Jenkinsfile stage scaffold verification
+  - `kubectl kustomize infra/aks/base` render validation
+  - Ansible preflight playbook check (when `ansible-playbook` is installed)
+- Week 2 runtime checks:
+  - UI build checks (optional via `--with-ui-checks`)
+  - API/worker unit tests
+  - GraphQL mutation/query/subscription end-to-end flow
+  - Redis/Mongo/Kafka data validation
 
 Optional flags:
 - run backend-only checks: `bash scripts/run-current-e2e.sh`
 - keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
 - skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
+- skip Week 3 Day 12 scaffold checks: `bash scripts/run-current-e2e.sh --skip-week3-checks`
 - include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
 - purge compose volumes at teardown: `bash scripts/run-current-e2e.sh --purge`
 

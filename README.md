@@ -2,14 +2,14 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
 
-## Current Runbook (Completed Through Week 3 Day 13)
+## Current Runbook (Completed Through Week 3 Day 14)
 This runbook reflects the latest completed implementation slice and supersedes prior flow details.
 
 Prerequisites:
 - Docker Desktop (or Docker daemon) running
 - Go toolchain installed (Go 1.23+)
 - Node.js + npm installed (Node 20+ recommended)
-- `kubectl` installed (required for Week 3 Day 13 AKS manifest and env-wiring validation)
+- `kubectl` installed (required for Week 3 Day 14 AKS/Jenkins validation checks)
 - `ansible-playbook` installed (optional: if unavailable, Week 3 Ansible preflight check is skipped with a log note)
 
 ### 1) Start Infra + Verify Connectivity + Canonical Kafka Topics
@@ -52,8 +52,9 @@ bash scripts/run-current-e2e.sh --with-ui-checks --purge
 ```
 
 Current validation coverage in `run-current-e2e.sh`:
-- Week 3 Day 13 scaffold checks:
-  - Jenkinsfile stage scaffold verification
+- Week 3 Day 14 scaffold checks:
+  - Jenkinsfile stage and command wiring verification (`build -> push -> deploy` markers)
+  - Day 14 containerization artifact checks (`api/worker/ui` Dockerfiles + `ui/nginx.conf`)
   - `kubectl kustomize infra/aks/base` render validation
   - AKS manifest contract checks (`dtq-api-config`, `dtq-worker-config`, `dtq-runtime-secrets`, `dtq-worker-grpc`)
   - API/worker deployment env-wiring validation
@@ -68,7 +69,7 @@ Optional flags:
 - run backend-only checks: `bash scripts/run-current-e2e.sh`
 - keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
 - skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
-- skip Week 3 Day 13 scaffold checks: `bash scripts/run-current-e2e.sh --skip-week3-checks`
+- skip Week 3 Day 14 scaffold checks: `bash scripts/run-current-e2e.sh --skip-week3-checks`
 - include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
 - purge compose volumes at teardown: `bash scripts/run-current-e2e.sh --purge`
 

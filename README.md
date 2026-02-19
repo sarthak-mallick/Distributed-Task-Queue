@@ -2,7 +2,7 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
 
-## Current Runbook (Completed Through Week 2 Day 9)
+## Current Runbook (Completed Through Week 2 Day 10)
 This runbook reflects the latest completed implementation slice and supersedes prior flow details.
 
 Prerequisites:

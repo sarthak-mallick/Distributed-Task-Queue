@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It validates Week 2 runtime behavior and Week 3 Day 14 cloud scaffolding checks.
+# It validates Week 2 runtime behavior and Week 3 Day 15 cloud scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -14,6 +14,7 @@ API_DIR="${ROOT_DIR}/api"
 WORKER_DIR="${ROOT_DIR}/worker"
 UI_DIR="${ROOT_DIR}/ui"
 AKS_BASE_DIR="${ROOT_DIR}/infra/aks/base"
+AKS_DEPLOY_SCRIPT="${ROOT_DIR}/infra/aks/scripts/deploy-release.sh"
 AZURE_ANSIBLE_DIR="${ROOT_DIR}/infra/azure/ansible"
 JENKINSFILE_PATH="${ROOT_DIR}/Jenkinsfile"
 
@@ -37,12 +38,12 @@ Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
-  --skip-week3-checks  Skip Week 3 Day 14 scaffold checks (Jenkinsfile/AKS/Ansible).
+  --skip-week3-checks  Skip Week 3 Day 15 scaffold checks (Jenkinsfile/AKS/Ansible).
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Validates Week 3 Day 14 scaffolding (Jenkins pipeline command wiring, Dockerfiles, AKS manifests/env wiring, Ansible preflight when installed).
+  1) Validates Week 3 Day 15 scaffolding (Jenkins/AKS image-tag contract wiring, Dockerfiles, AKS manifests/env wiring, Ansible preflight when installed).
   2) Starts compose infrastructure and smoke-checks it.
   3) Optionally runs frontend build checks (`--with-ui-checks`).
   4) Runs api/worker unit tests (unless skipped).
@@ -142,8 +143,8 @@ preflight_checks() {
   fi
 }
 
-# run_week3_day14_checks validates local cloud scaffolding introduced for Week 3.
-run_week3_day14_checks() {
+# run_week3_day15_checks validates local cloud scaffolding introduced for Week 3.
+run_week3_day15_checks() {
   local aks_render_file="${LOG_DIR}/aks-render.yaml"
   local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
   local temp_ssh_pub="${LOG_DIR}/jenkins-temp.pub"
@@ -157,6 +158,7 @@ run_week3_day14_checks() {
   local worker_dockerfile="${WORKER_DIR}/Dockerfile"
   local ui_dockerfile="${UI_DIR}/Dockerfile"
   local ui_nginx_conf="${UI_DIR}/nginx.conf"
+  local deploy_script="${AKS_DEPLOY_SCRIPT}"
   local required_stage
 
   if [[ ! -f "${JENKINSFILE_PATH}" ]]; then
@@ -171,35 +173,51 @@ run_week3_day14_checks() {
     fi
   done
   if grep -q "TODO:" "${JENKINSFILE_PATH}"; then
-    log "Jenkinsfile still contains TODO placeholders; Day 14 pipeline wiring is incomplete"
+    log "Jenkinsfile still contains TODO placeholders; Day 15 pipeline wiring is incomplete"
     exit 1
   fi
   for required_cmd in \
-    "docker build -f api/Dockerfile" \
-    "docker build -f worker/Dockerfile" \
-    "docker build -f ui/Dockerfile" \
-    'docker push "${API_IMAGE}"' \
-    'docker push "${WORKER_IMAGE}"' \
-    'docker push "${UI_IMAGE}"' \
+    'for component in api worker ui; do' \
+    'image_ref="${ACR_LOGIN_SERVER}/dtq-${component}:${IMAGE_TAG}"' \
+    'docker build -f "${component}/Dockerfile" -t "${image_ref}" "${component}"' \
+    'docker push "${image_ref}"' \
     "az login --service-principal" \
     "az aks get-credentials" \
-    "kubectl apply -k infra/aks/base" \
-    'kubectl -n "${K8S_NAMESPACE}" set image deployment/dtq-api' \
-    'kubectl -n "${K8S_NAMESPACE}" rollout status deployment/dtq-api'; do
+    'bash infra/aks/scripts/deploy-release.sh'; do
     if ! grep -F -q "${required_cmd}" "${JENKINSFILE_PATH}"; then
-      log "Jenkinsfile missing required Day 14 command marker: ${required_cmd}"
+      log "Jenkinsfile missing required Day 15 command marker: ${required_cmd}"
       exit 1
     fi
   done
-  log "jenkinsfile stage and command wiring check passed"
+  log "jenkinsfile stage and day15 command wiring check passed"
 
   for required_file in "${api_dockerfile}" "${worker_dockerfile}" "${ui_dockerfile}" "${ui_nginx_conf}"; do
     if [[ ! -f "${required_file}" ]]; then
-      log "required Day 14 containerization file missing: ${required_file}"
+      log "required Day 15 containerization file missing: ${required_file}"
       exit 1
     fi
   done
   log "dockerfile scaffold check passed"
+
+  if [[ ! -x "${deploy_script}" ]]; then
+    log "AKS deploy helper script missing or not executable: ${deploy_script}"
+    exit 1
+  fi
+  for required_marker in \
+    'dtq-%s:%s' \
+    'kubectl apply -k "${AKS_BASE_DIR}"' \
+    'set image deployment/dtq-api' \
+    'set image deployment/dtq-worker' \
+    'set image deployment/dtq-ui' \
+    'rollout status deployment/dtq-api' \
+    'rollout status deployment/dtq-worker' \
+    'rollout status deployment/dtq-ui'; do
+    if ! grep -F -q "${required_marker}" "${deploy_script}"; then
+      log "AKS deploy helper missing required Day 15 marker: ${required_marker}"
+      exit 1
+    fi
+  done
+  log "aks deploy helper contract check passed"
 
   if [[ ! -f "${AKS_BASE_DIR}/kustomization.yaml" ]]; then
     log "missing AKS kustomization at ${AKS_BASE_DIR}/kustomization.yaml"
@@ -252,7 +270,7 @@ run_week3_day14_checks() {
   log "aks kustomize render and manifest wiring checks passed"
 
   if command -v ansible-playbook >/dev/null 2>&1; then
-    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY14ValidationKey local-test" >"${temp_ssh_pub}"
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY15ValidationKey local-test" >"${temp_ssh_pub}"
 
     cat >"${ansible_vars_file}" <<EOF
 azure_subscription_id: "00000000-0000-0000-0000-000000000000"
@@ -504,8 +522,8 @@ fi
 preflight_checks
 
 if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
-  log "running week 3 day 14 scaffold checks"
-  run_week3_day14_checks
+  log "running week 3 day 15 scaffold checks"
+  run_week3_day15_checks
 else
   log "skipping week 3 checks (--skip-week3-checks)"
 fi

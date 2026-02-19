@@ -52,8 +52,8 @@ Update this table continuously during Week 3 execution.
 | W3-002 | Completed | 2026-02-19 | Added Azure variable contract template + Day 12 preflight validation playbook. |
 | W3-003 | Completed | 2026-02-19 | Added Day 13 AKS manifest baseline depth: config/secret wiring, worker gRPC service, and deployment env/probe contract checks. |
 | W3-004 | Completed | 2026-02-19 | Replaced Jenkins TODO placeholders with executable contract validation, Docker build/push steps, and AKS deploy/rollout commands. |
-| W3-005 | Pending | 2026-02-19 | Planned for mid-week CI/CD wiring. |
-| W3-006 | In Progress | 2026-02-19 | Integrated Day 14 Jenkins/Dockerfile checks into canonical `scripts/run-current-e2e.sh` and aligned README runbook. |
+| W3-005 | Completed | 2026-02-19 | Standardized image contract across CI and manifests: `${ACR_LOGIN_SERVER}/dtq-<component>:${IMAGE_TAG}` for `api/worker/ui` with shared deploy helper. |
+| W3-006 | In Progress | 2026-02-19 | Integrated Day 15 image-contract checks into canonical `scripts/run-current-e2e.sh` and aligned README/AKS runbook docs. |
 
 ## Implementation Order
 
@@ -108,11 +108,14 @@ Update this table continuously during Week 3 execution.
 - 2026-02-19: Added Day 14 containerization artifacts (`api/worker/ui` Dockerfiles and `ui/nginx.conf`) required by Jenkins build stages.
 - 2026-02-19: Updated canonical `scripts/run-current-e2e.sh` + `README.md` to Day 14 checks and revalidated full flow (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --with-ui-checks --purge`) with all checks passing.
 - 2026-02-19: Validated Day 14 container builds locally (`docker build` for `api`, `worker`, and `ui`) with all three images building successfully.
+- 2026-02-19: Completed Day 15 image/tag contract alignment (`W3-005`) by standardizing CI image naming to `${ACR_LOGIN_SERVER}/dtq-<component>:${IMAGE_TAG}` and introducing `infra/aks/scripts/deploy-release.sh`.
+- 2026-02-19: Updated canonical `scripts/run-current-e2e.sh`, `README.md`, and `infra/aks/README.md` for Day 15 contract checks and deploy-helper coverage.
+- 2026-02-19: Revalidated Day 15 cumulative flow with UI checks (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --with-ui-checks --purge`) and all checks passed.
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 14 completed)
-- Completed tasks: W3-001, W3-002, W3-003, W3-004
+- Week status: In progress (Day 15 completed)
+- Completed tasks: W3-001, W3-002, W3-003, W3-004, W3-005
 - In-progress tasks: W3-006
 - Blockers: None
-- Next task: Execute Day 15 (`W3-005`) to standardize image registry/tag contract across Jenkins pipeline and AKS manifests.
+- Next task: Execute Day 16 (`W3-006`) to finalize Week 3 validation/handoff readiness (docs + script coverage closure).

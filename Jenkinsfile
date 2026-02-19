@@ -74,16 +74,11 @@ pipeline {
         sh '''
           set -euo pipefail
 
-          API_IMAGE="${ACR_LOGIN_SERVER}/dtq-api:${IMAGE_TAG}"
-          WORKER_IMAGE="${ACR_LOGIN_SERVER}/dtq-worker:${IMAGE_TAG}"
-          UI_IMAGE="${ACR_LOGIN_SERVER}/dtq-ui:${IMAGE_TAG}"
-
-          docker build -f api/Dockerfile -t "${API_IMAGE}" api
-          docker build -f worker/Dockerfile -t "${WORKER_IMAGE}" worker
-          docker build -f ui/Dockerfile -t "${UI_IMAGE}" ui
-
-          echo "built images:"
-          docker image ls "${API_IMAGE}" "${WORKER_IMAGE}" "${UI_IMAGE}"
+          for component in api worker ui; do
+            image_ref="${ACR_LOGIN_SERVER}/dtq-${component}:${IMAGE_TAG}"
+            docker build -f "${component}/Dockerfile" -t "${image_ref}" "${component}"
+            echo "built ${image_ref}"
+          done
         '''
       }
     }
@@ -93,15 +88,13 @@ pipeline {
         sh '''
           set -euo pipefail
 
-          API_IMAGE="${ACR_LOGIN_SERVER}/dtq-api:${IMAGE_TAG}"
-          WORKER_IMAGE="${ACR_LOGIN_SERVER}/dtq-worker:${IMAGE_TAG}"
-          UI_IMAGE="${ACR_LOGIN_SERVER}/dtq-ui:${IMAGE_TAG}"
-
           echo "${AZURE_CLIENT_SECRET}" | docker login "${ACR_LOGIN_SERVER}" --username "${AZURE_CLIENT_ID}" --password-stdin
 
-          docker push "${API_IMAGE}"
-          docker push "${WORKER_IMAGE}"
-          docker push "${UI_IMAGE}"
+          for component in api worker ui; do
+            image_ref="${ACR_LOGIN_SERVER}/dtq-${component}:${IMAGE_TAG}"
+            docker push "${image_ref}"
+            echo "pushed ${image_ref}"
+          done
 
           docker logout "${ACR_LOGIN_SERVER}" || true
         '''
@@ -112,10 +105,6 @@ pipeline {
       steps {
         sh '''
           set -euo pipefail
-
-          API_IMAGE="${ACR_LOGIN_SERVER}/dtq-api:${IMAGE_TAG}"
-          WORKER_IMAGE="${ACR_LOGIN_SERVER}/dtq-worker:${IMAGE_TAG}"
-          UI_IMAGE="${ACR_LOGIN_SERVER}/dtq-ui:${IMAGE_TAG}"
 
           az login --service-principal \
             --username "${AZURE_CLIENT_ID}" \
@@ -128,17 +117,10 @@ pipeline {
             --name "${AZURE_AKS_CLUSTER_NAME}" \
             --overwrite-existing
 
-          kubectl apply -k infra/aks/base
-
-          kubectl -n "${K8S_NAMESPACE}" set image deployment/dtq-api api="${API_IMAGE}"
-          kubectl -n "${K8S_NAMESPACE}" set image deployment/dtq-worker worker="${WORKER_IMAGE}"
-          kubectl -n "${K8S_NAMESPACE}" set image deployment/dtq-ui ui="${UI_IMAGE}"
-
-          kubectl -n "${K8S_NAMESPACE}" rollout status deployment/dtq-api --timeout=300s
-          kubectl -n "${K8S_NAMESPACE}" rollout status deployment/dtq-worker --timeout=300s
-          kubectl -n "${K8S_NAMESPACE}" rollout status deployment/dtq-ui --timeout=300s
-
-          kubectl -n "${K8S_NAMESPACE}" get deployments
+          ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER}" \
+          IMAGE_TAG="${IMAGE_TAG}" \
+          K8S_NAMESPACE="${K8S_NAMESPACE}" \
+          bash infra/aks/scripts/deploy-release.sh
         '''
       }
     }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It validates Week 2 runtime behavior and Week 3 Day 12 cloud scaffolding checks.
+# It validates Week 2 runtime behavior and Week 3 Day 16 cloud scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -14,14 +14,17 @@ API_DIR="${ROOT_DIR}/api"
 WORKER_DIR="${ROOT_DIR}/worker"
 UI_DIR="${ROOT_DIR}/ui"
 AKS_BASE_DIR="${ROOT_DIR}/infra/aks/base"
+AKS_DEPLOY_SCRIPT="${ROOT_DIR}/infra/aks/scripts/deploy-release.sh"
 AZURE_ANSIBLE_DIR="${ROOT_DIR}/infra/azure/ansible"
 JENKINSFILE_PATH="${ROOT_DIR}/Jenkinsfile"
+WEEK3_HANDOFF_DOC="${ROOT_DIR}/docs/week-3-handoff.md"
 
 KEEP_INFRA=false
 SKIP_UNIT_TESTS=false
 PURGE_VOLUMES=false
 WITH_UI_CHECKS=false
 SKIP_WEEK3_CHECKS=false
+SKIP_IMAGE_BUILD_CHECKS=false
 
 # log prints all script status lines with a stable prefix.
 log() {
@@ -36,19 +39,21 @@ Usage: bash scripts/run-current-e2e.sh [options]
 Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
+  --skip-image-build-checks  Skip local Docker image build validation for api/worker/ui.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
-  --skip-week3-checks  Skip Week 3 Day 12 scaffold checks (Jenkinsfile/AKS/Ansible).
+  --skip-week3-checks  Skip Week 3 Day 16 scaffold checks (Jenkinsfile/AKS/Ansible).
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Validates Week 3 Day 12 scaffolding (Jenkinsfile stages, AKS kustomize render, Ansible preflight when installed).
-  2) Starts compose infrastructure and smoke-checks it.
-  3) Optionally runs frontend build checks (`--with-ui-checks`).
-  4) Runs api/worker unit tests (unless skipped).
-  5) Starts API and worker with isolated topic/queue settings.
-  6) Submits a weather-profile job via GraphQL, validates subscription updates, and checks Redis/Mongo/Kafka.
-  7) Tears down app processes and infra by default.
+  1) Validates Week 3 Day 16 scaffolding (Jenkins/AKS image-tag contract wiring, Dockerfiles, deploy-helper dry run, handoff doc, AKS manifests/env wiring, Ansible preflight when installed).
+  2) Validates local container image builds for api/worker/ui (unless skipped).
+  3) Starts compose infrastructure and smoke-checks it.
+  4) Optionally runs frontend build checks (`--with-ui-checks`).
+  5) Runs api/worker unit tests (unless skipped).
+  6) Starts API and worker with isolated topic/queue settings.
+  7) Submits a weather-profile job via GraphQL, validates subscription updates, and checks Redis/Mongo/Kafka.
+  8) Tears down app processes and infra by default.
 EOF
 }
 
@@ -60,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-unit-tests)
       SKIP_UNIT_TESTS=true
+      shift
+      ;;
+    --skip-image-build-checks)
+      SKIP_IMAGE_BUILD_CHECKS=true
       shift
       ;;
     --with-ui-checks)
@@ -111,6 +120,7 @@ UNKNOWN_JSON="${LOG_DIR}/unknown-status.json"
 
 API_PID=""
 WORKER_PID=""
+BUILT_IMAGES=()
 
 COMPOSE_CMD=(docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}")
 
@@ -142,11 +152,23 @@ preflight_checks() {
   fi
 }
 
-# run_week3_day12_checks validates local cloud scaffolding introduced for Week 3.
-run_week3_day12_checks() {
+# run_week3_day16_checks validates local cloud scaffolding introduced for Week 3.
+run_week3_day16_checks() {
   local aks_render_file="${LOG_DIR}/aks-render.yaml"
   local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
   local temp_ssh_pub="${LOG_DIR}/jenkins-temp.pub"
+  local api_manifest="${AKS_BASE_DIR}/api-deployment.yaml"
+  local worker_manifest="${AKS_BASE_DIR}/worker-deployment.yaml"
+  local worker_service_manifest="${AKS_BASE_DIR}/worker-service.yaml"
+  local api_config_manifest="${AKS_BASE_DIR}/api-configmap.yaml"
+  local worker_config_manifest="${AKS_BASE_DIR}/worker-configmap.yaml"
+  local runtime_secret_manifest="${AKS_BASE_DIR}/runtime-secrets.yaml"
+  local api_dockerfile="${API_DIR}/Dockerfile"
+  local worker_dockerfile="${WORKER_DIR}/Dockerfile"
+  local ui_dockerfile="${UI_DIR}/Dockerfile"
+  local ui_nginx_conf="${UI_DIR}/nginx.conf"
+  local deploy_script="${AKS_DEPLOY_SCRIPT}"
+  local week3_handoff_doc="${WEEK3_HANDOFF_DOC}"
   local required_stage
 
   if [[ ! -f "${JENKINSFILE_PATH}" ]]; then
@@ -160,7 +182,73 @@ run_week3_day12_checks() {
       exit 1
     fi
   done
-  log "jenkinsfile scaffold check passed"
+  if grep -q "TODO:" "${JENKINSFILE_PATH}"; then
+    log "Jenkinsfile still contains TODO placeholders; Day 16 pipeline wiring is incomplete"
+    exit 1
+  fi
+  for required_cmd in \
+    'for component in api worker ui; do' \
+    'image_ref="${ACR_LOGIN_SERVER}/dtq-${component}:${IMAGE_TAG}"' \
+    'docker build -f "${component}/Dockerfile" -t "${image_ref}" "${component}"' \
+    'docker push "${image_ref}"' \
+    "az login --service-principal" \
+    "az aks get-credentials" \
+    'bash infra/aks/scripts/deploy-release.sh'; do
+    if ! grep -F -q "${required_cmd}" "${JENKINSFILE_PATH}"; then
+      log "Jenkinsfile missing required Day 16 command marker: ${required_cmd}"
+      exit 1
+    fi
+  done
+  log "jenkinsfile stage and day16 command wiring check passed"
+
+  for required_file in "${api_dockerfile}" "${worker_dockerfile}" "${ui_dockerfile}" "${ui_nginx_conf}"; do
+    if [[ ! -f "${required_file}" ]]; then
+      log "required Day 16 containerization file missing: ${required_file}"
+      exit 1
+    fi
+  done
+  log "dockerfile scaffold check passed"
+
+  if [[ ! -x "${deploy_script}" ]]; then
+    log "AKS deploy helper script missing or not executable: ${deploy_script}"
+    exit 1
+  fi
+  for required_marker in \
+    'dtq-%s:%s' \
+    'kubectl apply -k "${AKS_BASE_DIR}"' \
+    'set image deployment/dtq-api' \
+    'set image deployment/dtq-worker' \
+    'set image deployment/dtq-ui' \
+    'rollout status deployment/dtq-api' \
+    'rollout status deployment/dtq-worker' \
+    'rollout status deployment/dtq-ui' \
+    'DRY_RUN="${DRY_RUN:-false}"' \
+    'if [[ "${DRY_RUN}" == "true" ]]; then' \
+    'kubectl kustomize "${AKS_BASE_DIR}" >/dev/null'; do
+    if ! grep -F -q "${required_marker}" "${deploy_script}"; then
+      log "AKS deploy helper missing required Day 16 marker: ${required_marker}"
+      exit 1
+    fi
+  done
+  log "aks deploy helper contract check passed"
+
+  if ! ACR_LOGIN_SERVER="example.azurecr.io" IMAGE_TAG="day16-check" K8S_NAMESPACE="dtq" DRY_RUN="true" bash "${deploy_script}" >/dev/null; then
+    log "AKS deploy helper dry-run validation failed"
+    exit 1
+  fi
+  log "aks deploy helper dry-run check passed"
+
+  if [[ ! -f "${week3_handoff_doc}" ]]; then
+    log "Week 3 handoff doc missing at ${week3_handoff_doc}"
+    exit 1
+  fi
+  for required_handoff_line in "^Scope:" "^Changes:" "^Acceptance criteria status:" "^Risks/issues:" "^Next step:"; do
+    if ! grep -Eq "${required_handoff_line}" "${week3_handoff_doc}"; then
+      log "Week 3 handoff doc missing required line matching ${required_handoff_line}"
+      exit 1
+    fi
+  done
+  log "week 3 handoff doc check passed"
 
   if [[ ! -f "${AKS_BASE_DIR}/kustomization.yaml" ]]; then
     log "missing AKS kustomization at ${AKS_BASE_DIR}/kustomization.yaml"
@@ -176,10 +264,44 @@ run_week3_day12_checks() {
     log "AKS render output missing expected Namespace/Deployment/Service resources"
     exit 1
   fi
-  log "aks kustomize render check passed"
+  for required_manifest in \
+    "${api_manifest}" \
+    "${worker_manifest}" \
+    "${worker_service_manifest}" \
+    "${api_config_manifest}" \
+    "${worker_config_manifest}" \
+    "${runtime_secret_manifest}"; do
+    if [[ ! -f "${required_manifest}" ]]; then
+      log "required Week 3 manifest is missing: ${required_manifest}"
+      exit 1
+    fi
+  done
+  for required_name in \
+    "name: dtq-api-config" \
+    "name: dtq-worker-config" \
+    "name: dtq-runtime-secrets" \
+    "name: dtq-worker-grpc"; do
+    if ! grep -q "${required_name}" "${aks_render_file}"; then
+      log "AKS render output missing required resource marker: ${required_name}"
+      exit 1
+    fi
+  done
+  if ! grep -q 'name: dtq-api-config' "${api_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${api_manifest}" || ! grep -q 'value: "dtq-worker-grpc:9090"' "${api_manifest}"; then
+    log "api deployment manifest is missing required env wiring references"
+    exit 1
+  fi
+  if ! grep -q 'name: dtq-worker-config' "${worker_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${worker_manifest}" || ! grep -q 'name: WORKER_GRPC_ADDR' "${worker_manifest}"; then
+    log "worker deployment manifest is missing required env wiring references"
+    exit 1
+  fi
+  if ! grep -q 'tcpSocket:' "${worker_manifest}"; then
+    log "worker deployment manifest is missing tcp liveness/readiness probes"
+    exit 1
+  fi
+  log "aks kustomize render and manifest wiring checks passed"
 
   if command -v ansible-playbook >/dev/null 2>&1; then
-    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY12ValidationKey local-test" >"${temp_ssh_pub}"
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY16ValidationKey local-test" >"${temp_ssh_pub}"
 
     cat >"${ansible_vars_file}" <<EOF
 azure_subscription_id: "00000000-0000-0000-0000-000000000000"
@@ -198,10 +320,24 @@ EOF
 
     ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" --syntax-check >/dev/null
     ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" -e "@${ansible_vars_file}" >/dev/null
-    log "ansible day12 preflight check passed"
+    log "ansible week3 preflight check passed"
   else
-    log "ansible-playbook not installed; skipping ansible day12 preflight check"
+    log "ansible-playbook not installed; skipping ansible week3 preflight check"
   fi
+}
+
+# run_image_build_checks validates local Dockerfiles by building all service images.
+run_image_build_checks() {
+  local image_tag="day16-local-${RUN_ID}"
+  local component
+  local image_ref
+
+  for component in api worker ui; do
+    image_ref="dtq-${component}:${image_tag}"
+    docker build -f "${ROOT_DIR}/${component}/Dockerfile" -t "${image_ref}" "${ROOT_DIR}/${component}" >/dev/null
+    BUILT_IMAGES+=("${image_ref}")
+    log "docker image build check passed component=${component} image=${image_ref}"
+  done
 }
 
 # run_ui_checks validates the React UI build path as part of e2e validation.
@@ -250,6 +386,10 @@ cleanup() {
 
   stop_process "${API_PID}" "api"
   stop_process "${WORKER_PID}" "worker"
+
+  for image in "${BUILT_IMAGES[@]}"; do
+    docker image rm -f "${image}" >/dev/null 2>&1 || true
+  done
 
   if [[ "${KEEP_INFRA}" == "false" ]]; then
     if [[ "${PURGE_VOLUMES}" == "true" ]]; then
@@ -431,10 +571,17 @@ fi
 preflight_checks
 
 if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
-  log "running week 3 day 12 scaffold checks"
-  run_week3_day12_checks
+  log "running week 3 day 16 scaffold checks"
+  run_week3_day16_checks
 else
   log "skipping week 3 checks (--skip-week3-checks)"
+fi
+
+if [[ "${SKIP_IMAGE_BUILD_CHECKS}" == "false" ]]; then
+  log "running local image build checks"
+  run_image_build_checks
+else
+  log "skipping local image build checks (--skip-image-build-checks)"
 fi
 
 if [[ "${WITH_UI_CHECKS}" == "true" ]]; then

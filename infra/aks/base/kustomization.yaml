@@ -5,19 +5,23 @@ namespace: dtq
 
 resources:
   - namespace.yaml
+  - api-configmap.yaml
+  - worker-configmap.yaml
+  - runtime-secrets.yaml
   - api-deployment.yaml
   - api-service.yaml
   - worker-deployment.yaml
+  - worker-service.yaml
   - ui-deployment.yaml
   - ui-service.yaml
 
 images:
   - name: dtq-api
-    newName: example.azurecr.io/dtq-api
+    newName: dtq-api
     newTag: latest
   - name: dtq-worker
-    newName: example.azurecr.io/dtq-worker
+    newName: dtq-worker
     newTag: latest
   - name: dtq-ui
-    newName: example.azurecr.io/dtq-ui
+    newName: dtq-ui
     newTag: latest

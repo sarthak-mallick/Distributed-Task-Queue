@@ -20,6 +20,11 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: dtq-api-config
+            - secretRef:
+                name: dtq-runtime-secrets
           env:
             - name: API_ADDR
               value: ":8080"

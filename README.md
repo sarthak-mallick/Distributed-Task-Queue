@@ -2,15 +2,15 @@
 
 A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
 
-## Current Runbook (Completed Through Week 3 Day 12)
+## Current Runbook (Completed Through Week 3 Day 16)
 This runbook reflects the latest completed implementation slice and supersedes prior flow details.
 
 Prerequisites:
 - Docker Desktop (or Docker daemon) running
 - Go toolchain installed (Go 1.23+)
 - Node.js + npm installed (Node 20+ recommended)
-- `kubectl` installed (required for Week 3 Day 12 AKS manifest render validation)
-- `ansible-playbook` installed (optional: if unavailable, Day 12 Ansible preflight check is skipped with a log note)
+- `kubectl` installed (required for Week 3 Day 16 AKS/Jenkins validation checks)
+- `ansible-playbook` installed (optional: if unavailable, Week 3 Ansible preflight check is skipped with a log note)
 
 ### 1) Start Infra + Verify Connectivity + Canonical Kafka Topics
 ```bash
@@ -52,9 +52,15 @@ bash scripts/run-current-e2e.sh --with-ui-checks --purge
 ```
 
 Current validation coverage in `run-current-e2e.sh`:
-- Week 3 Day 12 scaffold checks:
-  - Jenkinsfile stage scaffold verification
+- Week 3 Day 16 scaffold checks:
+  - Jenkinsfile stage + shared image contract verification (`${ACR_LOGIN_SERVER}/dtq-<component>:${IMAGE_TAG}`)
+  - AKS deploy helper verification + dry run (`infra/aks/scripts/deploy-release.sh`)
+  - Week 3 handoff artifact verification (`docs/week-3-handoff.md`)
+  - Containerization artifact checks (`api/worker/ui` Dockerfiles + `ui/nginx.conf`)
+  - Local Docker image build checks for `api`, `worker`, and `ui` (can be skipped for faster runs)
   - `kubectl kustomize infra/aks/base` render validation
+  - AKS manifest contract checks (`dtq-api-config`, `dtq-worker-config`, `dtq-runtime-secrets`, `dtq-worker-grpc`)
+  - API/worker deployment env-wiring validation
   - Ansible preflight playbook check (when `ansible-playbook` is installed)
 - Week 2 runtime checks:
   - UI build checks (optional via `--with-ui-checks`)
@@ -66,7 +72,8 @@ Optional flags:
 - run backend-only checks: `bash scripts/run-current-e2e.sh`
 - keep containers running: `bash scripts/run-current-e2e.sh --keep-infra`
 - skip Go unit tests: `bash scripts/run-current-e2e.sh --skip-unit-tests`
-- skip Week 3 Day 12 scaffold checks: `bash scripts/run-current-e2e.sh --skip-week3-checks`
+- skip local image builds: `bash scripts/run-current-e2e.sh --skip-image-build-checks`
+- skip Week 3 Day 16 scaffold checks: `bash scripts/run-current-e2e.sh --skip-week3-checks`
 - include frontend checks (`npm install/ci` + `npm run build`): `bash scripts/run-current-e2e.sh --with-ui-checks`
 - purge compose volumes at teardown: `bash scripts/run-current-e2e.sh --purge`
 

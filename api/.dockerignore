@@ -1,0 +1,5 @@
+.git
+.cache
+.tmp
+README.md
+*_test.go

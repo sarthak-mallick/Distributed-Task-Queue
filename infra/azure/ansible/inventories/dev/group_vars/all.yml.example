@@ -1,0 +1,29 @@
+---
+# Azure authentication (service principal)
+azure_subscription_id: "00000000-0000-0000-0000-000000000000"
+azure_client_id: "00000000-0000-0000-0000-000000000000"
+azure_client_secret: "replace-me"
+azure_tenant_id: "00000000-0000-0000-0000-000000000000"
+
+# Resource naming + location
+azure_location: "eastus"
+azure_resource_group: "dtq-week3-rg"
+azure_tags:
+  project: "distributed-task-queue"
+  environment: "dev"
+
+# ACR
+azure_acr_name: "dtqweek3acr"
+azure_acr_sku: "Basic"
+
+# AKS
+azure_aks_name: "dtq-week3-aks"
+azure_aks_kubernetes_version: "1.29"
+azure_aks_node_vm_size: "Standard_DS2_v2"
+azure_aks_node_count: 2
+
+# Jenkins VM
+azure_jenkins_vm_name: "dtq-jenkins-vm"
+azure_jenkins_vm_size: "Standard_B2s"
+azure_jenkins_admin_username: "jenkinsadmin"
+azure_jenkins_ssh_public_key_path: "~/.ssh/id_rsa.pub"

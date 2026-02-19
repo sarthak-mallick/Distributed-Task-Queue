@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dtq
+
+resources:
+  - namespace.yaml
+  - api-deployment.yaml
+  - api-service.yaml
+  - worker-deployment.yaml
+  - ui-deployment.yaml
+  - ui-service.yaml
+
+images:
+  - name: dtq-api
+    newName: example.azurecr.io/dtq-api
+    newTag: latest
+  - name: dtq-worker
+    newName: example.azurecr.io/dtq-worker
+    newTag: latest
+  - name: dtq-ui
+    newName: example.azurecr.io/dtq-ui
+    newTag: latest

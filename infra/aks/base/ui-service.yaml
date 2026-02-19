@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dtq-ui
+  labels:
+    app: dtq-ui
+spec:
+  selector:
+    app: dtq-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: LoadBalancer

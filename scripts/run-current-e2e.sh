@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It isolates test traffic with a unique Kafka topic and validates Week 2 GraphQL + subscription behavior.
+# It validates Week 2 runtime behavior and Week 3 Day 12 cloud scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -13,11 +13,15 @@ ENV_EXAMPLE="${COMPOSE_DIR}/.env.example"
 API_DIR="${ROOT_DIR}/api"
 WORKER_DIR="${ROOT_DIR}/worker"
 UI_DIR="${ROOT_DIR}/ui"
+AKS_BASE_DIR="${ROOT_DIR}/infra/aks/base"
+AZURE_ANSIBLE_DIR="${ROOT_DIR}/infra/azure/ansible"
+JENKINSFILE_PATH="${ROOT_DIR}/Jenkinsfile"
 
 KEEP_INFRA=false
 SKIP_UNIT_TESTS=false
 PURGE_VOLUMES=false
 WITH_UI_CHECKS=false
+SKIP_WEEK3_CHECKS=false
 
 # log prints all script status lines with a stable prefix.
 log() {
@@ -33,16 +37,18 @@ Options:
   --keep-infra         Keep Docker Compose services running after the test.
   --skip-unit-tests    Skip `go test ./...` for api and worker.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
+  --skip-week3-checks  Skip Week 3 Day 12 scaffold checks (Jenkinsfile/AKS/Ansible).
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Starts compose infrastructure and smoke-checks it.
-  2) Optionally runs frontend build checks (`--with-ui-checks`).
-  3) Runs api/worker unit tests (unless skipped).
-  4) Starts API and worker with isolated topic/queue settings.
-  5) Submits a weather-profile job via GraphQL, validates subscription updates, and checks Redis/Mongo/Kafka.
-  6) Tears down app processes and infra by default.
+  1) Validates Week 3 Day 12 scaffolding (Jenkinsfile stages, AKS kustomize render, Ansible preflight when installed).
+  2) Starts compose infrastructure and smoke-checks it.
+  3) Optionally runs frontend build checks (`--with-ui-checks`).
+  4) Runs api/worker unit tests (unless skipped).
+  5) Starts API and worker with isolated topic/queue settings.
+  6) Submits a weather-profile job via GraphQL, validates subscription updates, and checks Redis/Mongo/Kafka.
+  7) Tears down app processes and infra by default.
 EOF
 }
 
@@ -58,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with-ui-checks)
       WITH_UI_CHECKS=true
+      shift
+      ;;
+    --skip-week3-checks)
+      SKIP_WEEK3_CHECKS=true
       shift
       ;;
     --purge)
@@ -119,6 +129,9 @@ preflight_checks() {
   require_command go
   require_command curl
   require_command node
+  if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
+    require_command kubectl
+  fi
   if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
     require_command npm
   fi
@@ -126,6 +139,68 @@ preflight_checks() {
   if ! docker info >/dev/null 2>&1; then
     log "docker daemon is not reachable; start Docker Desktop and retry"
     exit 1
+  fi
+}
+
+# run_week3_day12_checks validates local cloud scaffolding introduced for Week 3.
+run_week3_day12_checks() {
+  local aks_render_file="${LOG_DIR}/aks-render.yaml"
+  local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
+  local temp_ssh_pub="${LOG_DIR}/jenkins-temp.pub"
+  local required_stage
+
+  if [[ ! -f "${JENKINSFILE_PATH}" ]]; then
+    log "missing Jenkinsfile at ${JENKINSFILE_PATH}"
+    exit 1
+  fi
+
+  for required_stage in "stage('Checkout')" "stage('Unit Tests')" "stage('UI Build')" "stage('Docker Build')" "stage('Push to ACR')" "stage('Deploy to AKS')"; do
+    if ! grep -q "${required_stage}" "${JENKINSFILE_PATH}"; then
+      log "Jenkinsfile missing required stage marker: ${required_stage}"
+      exit 1
+    fi
+  done
+  log "jenkinsfile scaffold check passed"
+
+  if [[ ! -f "${AKS_BASE_DIR}/kustomization.yaml" ]]; then
+    log "missing AKS kustomization at ${AKS_BASE_DIR}/kustomization.yaml"
+    exit 1
+  fi
+
+  kubectl kustomize "${AKS_BASE_DIR}" >"${aks_render_file}"
+  if [[ ! -s "${aks_render_file}" ]]; then
+    log "AKS render output is empty"
+    exit 1
+  fi
+  if ! grep -q '^kind: Deployment$' "${aks_render_file}" || ! grep -q '^kind: Service$' "${aks_render_file}" || ! grep -q '^kind: Namespace$' "${aks_render_file}"; then
+    log "AKS render output missing expected Namespace/Deployment/Service resources"
+    exit 1
+  fi
+  log "aks kustomize render check passed"
+
+  if command -v ansible-playbook >/dev/null 2>&1; then
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY12ValidationKey local-test" >"${temp_ssh_pub}"
+
+    cat >"${ansible_vars_file}" <<EOF
+azure_subscription_id: "00000000-0000-0000-0000-000000000000"
+azure_client_id: "00000000-0000-0000-0000-000000000000"
+azure_client_secret: "local-test-secret"
+azure_tenant_id: "00000000-0000-0000-0000-000000000000"
+azure_location: "eastus"
+azure_resource_group: "dtq-week3-rg"
+azure_acr_name: "dtqweek3acr"
+azure_aks_name: "dtq-week3-aks"
+azure_aks_node_count: 2
+azure_jenkins_vm_name: "dtq-jenkins-vm"
+azure_jenkins_admin_username: "jenkinsadmin"
+azure_jenkins_ssh_public_key_path: "${temp_ssh_pub}"
+EOF
+
+    ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" --syntax-check >/dev/null
+    ansible-playbook -i localhost, "${AZURE_ANSIBLE_DIR}/playbooks/day12-preflight.yml" -e "@${ansible_vars_file}" >/dev/null
+    log "ansible day12 preflight check passed"
+  else
+    log "ansible-playbook not installed; skipping ansible day12 preflight check"
   fi
 }
 
@@ -354,6 +429,13 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 preflight_checks
+
+if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
+  log "running week 3 day 12 scaffold checks"
+  run_week3_day12_checks
+else
+  log "skipping week 3 checks (--skip-week3-checks)"
+fi
 
 if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
   run_ui_checks

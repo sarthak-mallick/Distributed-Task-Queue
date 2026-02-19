@@ -2,7 +2,7 @@
 
 Baseline Kubernetes manifests for Week 3 AKS deployment.
 
-## Current Scope (Day 15)
+## Current Scope (Day 16)
 
 - Base namespace
 - Runtime config and secret wiring for API/worker workloads
@@ -12,6 +12,7 @@ Baseline Kubernetes manifests for Week 3 AKS deployment.
 - UI deployment + service
 - Kustomization entrypoint for image overrides
 - Release deployment helper for shared image tag rollout
+- Dry-run deploy-helper validation path for local readiness checks
 
 ## Notes
 
@@ -35,5 +36,12 @@ kubectl kustomize infra/aks/base
 
 ```bash
 ACR_LOGIN_SERVER=myregistry.azurecr.io IMAGE_TAG=42 K8S_NAMESPACE=dtq \
+  bash infra/aks/scripts/deploy-release.sh
+```
+
+Local dry-run validation (no cluster mutation):
+
+```bash
+ACR_LOGIN_SERVER=myregistry.azurecr.io IMAGE_TAG=42 K8S_NAMESPACE=dtq DRY_RUN=true \
   bash infra/aks/scripts/deploy-release.sh
 ```

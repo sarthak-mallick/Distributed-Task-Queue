@@ -10,6 +10,7 @@ AKS_BASE_DIR="${ROOT_DIR}/infra/aks/base"
 K8S_NAMESPACE="${K8S_NAMESPACE:-dtq}"
 ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER:-}"
 IMAGE_TAG="${IMAGE_TAG:-}"
+DRY_RUN="${DRY_RUN:-false}"
 
 # log writes stable status lines for CI output scanning.
 log() {
@@ -37,6 +38,13 @@ require_env "IMAGE_TAG"
 if [[ ! -f "${AKS_BASE_DIR}/kustomization.yaml" ]]; then
   log "missing AKS kustomization at ${AKS_BASE_DIR}/kustomization.yaml"
   exit 1
+fi
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  log "dry-run mode enabled; validating release contract without cluster mutation"
+  kubectl kustomize "${AKS_BASE_DIR}" >/dev/null
+  log "dry-run release images api=$(image_ref api) worker=$(image_ref worker) ui=$(image_ref ui)"
+  exit 0
 fi
 
 log "applying AKS base manifests"

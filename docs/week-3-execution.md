@@ -53,7 +53,7 @@ Update this table continuously during Week 3 execution.
 | W3-003 | Completed | 2026-02-19 | Added Day 13 AKS manifest baseline depth: config/secret wiring, worker gRPC service, and deployment env/probe contract checks. |
 | W3-004 | Completed | 2026-02-19 | Replaced Jenkins TODO placeholders with executable contract validation, Docker build/push steps, and AKS deploy/rollout commands. |
 | W3-005 | Completed | 2026-02-19 | Standardized image contract across CI and manifests: `${ACR_LOGIN_SERVER}/dtq-<component>:${IMAGE_TAG}` for `api/worker/ui` with shared deploy helper. |
-| W3-006 | In Progress | 2026-02-19 | Integrated Day 15 image-contract checks into canonical `scripts/run-current-e2e.sh` and aligned README/AKS runbook docs. |
+| W3-006 | Completed | 2026-02-19 | Finalized Day 16 validation/handoff readiness: deploy-helper dry run, local image builds in canonical e2e, and Week 3 handoff doc/runbook closure. |
 
 ## Implementation Order
 
@@ -88,10 +88,11 @@ Update this table continuously during Week 3 execution.
 
 ## Week 3 Acceptance Checklist
 
-- Infra provisioning workflow artifacts exist and are documented.
-- Kubernetes manifests for all services exist with configurable images.
-- Jenkins pipeline stages support build/test/push/deploy flow.
-- Week 2 functional path remains intact while cloud artifacts are introduced.
+- Infra provisioning workflow artifacts exist and are documented: Pass
+- Kubernetes manifests for all services exist with configurable images: Pass
+- Jenkins pipeline stages support build/test/push/deploy flow: Pass
+- Week 2 functional path remains intact while cloud artifacts are introduced: Pass
+- Full Azure live deployment acceptance checks: Pending cloud execution
 
 ## Session Log (Append-Only)
 
@@ -111,11 +112,13 @@ Update this table continuously during Week 3 execution.
 - 2026-02-19: Completed Day 15 image/tag contract alignment (`W3-005`) by standardizing CI image naming to `${ACR_LOGIN_SERVER}/dtq-<component>:${IMAGE_TAG}` and introducing `infra/aks/scripts/deploy-release.sh`.
 - 2026-02-19: Updated canonical `scripts/run-current-e2e.sh`, `README.md`, and `infra/aks/README.md` for Day 15 contract checks and deploy-helper coverage.
 - 2026-02-19: Revalidated Day 15 cumulative flow with UI checks (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --with-ui-checks --purge`) and all checks passed.
+- 2026-02-19: Completed Day 16 validation/runbook closure (`W3-006`) with `docs/week-3-handoff.md`, deploy-helper dry-run support, and local image build checks integrated into `scripts/run-current-e2e.sh`.
+- 2026-02-19: Revalidated Day 16 cumulative flow with UI checks (`API_PORT=28080 WORKER_GRPC_ADDR=127.0.0.1:29090 bash scripts/run-current-e2e.sh --with-ui-checks --purge`) and all checks passed.
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 15 completed)
-- Completed tasks: W3-001, W3-002, W3-003, W3-004, W3-005
-- In-progress tasks: W3-006
+- Week status: Completed (Day 16 completed)
+- Completed tasks: W3-001, W3-002, W3-003, W3-004, W3-005, W3-006
+- In-progress tasks: None
 - Blockers: None
-- Next task: Execute Day 16 (`W3-006`) to finalize Week 3 validation/handoff readiness (docs + script coverage closure).
+- Next task: Start Week 4 Day 17 planning and implementation (`monitoring + hardening`).

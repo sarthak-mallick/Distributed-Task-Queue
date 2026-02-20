@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dtq-grafana-dashboard-overview
+  labels:
+    app: dtq-grafana
+data:
+  dtq-overview.json: |
+    {
+      "title": "DTQ Operational Overview",
+      "uid": "dtq-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "timezone": "browser",
+      "refresh": "15s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "tags": ["dtq", "week4"],
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "API Job Submission Throughput (5m rate)",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(dtq_api_job_submissions_total[5m]))",
+              "legendFormat": "submissions/s"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Worker Completion Throughput (5m rate)",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(dtq_worker_job_completed_total[5m]))",
+              "legendFormat": "completions/s"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "GraphQL Error Rate (5m rate)",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(dtq_api_graphql_http_failures_total[5m]))",
+              "legendFormat": "errors/s"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "GraphQL Avg Request Duration (seconds)",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "dtq_api_graphql_http_request_duration_seconds_average",
+              "legendFormat": "avg_duration"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Worker Jobs In Flight",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "dtq_worker_jobs_in_flight"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Worker Failure Rate (5m)",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(rate(dtq_worker_job_failed_total[5m]))"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Shutdown Drain Timeouts (15m)",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "increase(dtq_worker_shutdown_drain_timeouts_total[15m])"
+            }
+          ]
+        }
+      ]
+    }

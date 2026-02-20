@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It validates Week 2 runtime behavior and Week 4 Day 19 monitoring/reliability scaffolding checks.
+# It validates Week 2 runtime behavior and Week 4 Day 20 monitoring/reliability scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -42,13 +42,13 @@ Options:
   --skip-unit-tests    Skip `go test ./...` for api and worker.
   --skip-image-build-checks  Skip local Docker image build validation for api/worker/ui.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
-  --skip-week4-checks  Skip Week 4 Day 19 scaffold checks (Jenkinsfile/AKS/Ansible/Monitoring).
+  --skip-week4-checks  Skip Week 4 Day 20 scaffold checks (Jenkinsfile/AKS/Ansible/Monitoring).
   --skip-week3-checks  Alias for --skip-week4-checks.
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Validates Week 4 Day 19 scaffolding (Jenkins/AKS contract wiring, monitoring manifests, deploy-helper dry run, Week 4 execution doc, AKS manifests/env wiring, worker reliability/shutdown env wiring, Ansible preflight when installed).
+  1) Validates Week 4 Day 20 scaffolding (Jenkins/AKS contract wiring, monitoring manifests, deploy-helper dry run, Week 4 execution doc, AKS manifests/env wiring, worker reliability/shutdown env wiring, dashboard+alert manifests, Ansible preflight when installed).
   2) Validates local container image builds for api/worker/ui (unless skipped).
   3) Starts compose infrastructure and smoke-checks it.
   4) Optionally runs frontend build checks (`--with-ui-checks`).
@@ -162,8 +162,8 @@ preflight_checks() {
   fi
 }
 
-# run_week4_day19_checks validates local cloud/monitoring/reliability scaffolding introduced for Week 4.
-run_week4_day19_checks() {
+# run_week4_day20_checks validates local cloud/monitoring/reliability scaffolding introduced for Week 4.
+run_week4_day20_checks() {
   local aks_render_file="${LOG_DIR}/aks-render.yaml"
   local aks_monitoring_render_file="${LOG_DIR}/aks-monitoring-render.yaml"
   local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
@@ -195,7 +195,7 @@ run_week4_day19_checks() {
     fi
   done
   if grep -q "TODO:" "${JENKINSFILE_PATH}"; then
-    log "Jenkinsfile still contains TODO placeholders; Day 19 pipeline wiring is incomplete"
+    log "Jenkinsfile still contains TODO placeholders; Day 20 pipeline wiring is incomplete"
     exit 1
   fi
   for required_cmd in \
@@ -207,15 +207,15 @@ run_week4_day19_checks() {
     "az aks get-credentials" \
     'bash infra/aks/scripts/deploy-release.sh'; do
     if ! grep -F -q "${required_cmd}" "${JENKINSFILE_PATH}"; then
-      log "Jenkinsfile missing required Day 19 command marker: ${required_cmd}"
+      log "Jenkinsfile missing required Day 20 command marker: ${required_cmd}"
       exit 1
     fi
   done
-  log "jenkinsfile stage and day19 command wiring check passed"
+  log "jenkinsfile stage and day20 command wiring check passed"
 
   for required_file in "${api_dockerfile}" "${worker_dockerfile}" "${ui_dockerfile}" "${ui_nginx_conf}"; do
     if [[ ! -f "${required_file}" ]]; then
-      log "required Day 19 containerization file missing: ${required_file}"
+      log "required Day 20 containerization file missing: ${required_file}"
       exit 1
     fi
   done
@@ -238,13 +238,13 @@ run_week4_day19_checks() {
     'if [[ "${DRY_RUN}" == "true" ]]; then' \
     'kubectl kustomize "${AKS_BASE_DIR}" >/dev/null'; do
     if ! grep -F -q "${required_marker}" "${deploy_script}"; then
-      log "AKS deploy helper missing required Day 19 marker: ${required_marker}"
+      log "AKS deploy helper missing required Day 20 marker: ${required_marker}"
       exit 1
     fi
   done
   log "aks deploy helper contract check passed"
 
-  if ! ACR_LOGIN_SERVER="example.azurecr.io" IMAGE_TAG="day19-check" K8S_NAMESPACE="dtq" DRY_RUN="true" bash "${deploy_script}" >/dev/null; then
+  if ! ACR_LOGIN_SERVER="example.azurecr.io" IMAGE_TAG="day20-check" K8S_NAMESPACE="dtq" DRY_RUN="true" bash "${deploy_script}" >/dev/null; then
     log "AKS deploy helper dry-run validation failed"
     exit 1
   fi
@@ -317,7 +317,7 @@ run_week4_day19_checks() {
     "WORKER_RESULT_WRITE_MAX_BACKOFF" \
     "WORKER_SHUTDOWN_DRAIN_TIMEOUT"; do
     if ! grep -q "${required_worker_config}" "${worker_config_manifest}"; then
-      log "worker config manifest is missing Day 19 reliability key: ${required_worker_config}"
+      log "worker config manifest is missing Day 20 reliability key: ${required_worker_config}"
       exit 1
     fi
   done
@@ -340,17 +340,29 @@ run_week4_day19_checks() {
   for required_monitoring_name in \
     "name: dtq-monitoring" \
     "name: dtq-prometheus-config" \
+    "name: dtq-prometheus-rules" \
     "name: dtq-prometheus" \
-    "name: dtq-grafana"; do
+    "name: dtq-grafana" \
+    "name: dtq-grafana-datasources" \
+    "name: dtq-grafana-dashboard-provider" \
+    "name: dtq-grafana-dashboard-overview"; do
     if ! grep -q "${required_monitoring_name}" "${aks_monitoring_render_file}"; then
       log "AKS monitoring render missing required resource marker: ${required_monitoring_name}"
       exit 1
     fi
   done
+  if ! grep -q 'DTQAPIGraphQLFailureRateHigh' "${aks_monitoring_render_file}" || ! grep -q 'DTQWorkerShutdownDrainTimeoutDetected' "${aks_monitoring_render_file}"; then
+    log "AKS monitoring render missing required Day 20 alert rules"
+    exit 1
+  fi
+  if ! grep -q '/var/lib/grafana/dashboards/dtq-overview.json' "${aks_monitoring_render_file}" || ! grep -q '/etc/grafana/provisioning/datasources/datasource.yaml' "${aks_monitoring_render_file}"; then
+    log "AKS monitoring render missing required Day 20 grafana provisioning mounts"
+    exit 1
+  fi
   log "aks monitoring kustomize render checks passed"
 
   if command -v ansible-playbook >/dev/null 2>&1; then
-    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY19ValidationKey local-test" >"${temp_ssh_pub}"
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY20ValidationKey local-test" >"${temp_ssh_pub}"
 
     cat >"${ansible_vars_file}" <<EOF
 azure_subscription_id: "00000000-0000-0000-0000-000000000000"
@@ -377,7 +389,7 @@ EOF
 
 # run_image_build_checks validates local Dockerfiles by building all service images.
 run_image_build_checks() {
-  local image_tag="day19-local-${RUN_ID}"
+  local image_tag="day20-local-${RUN_ID}"
   local component
   local image_ref
 
@@ -643,8 +655,8 @@ fi
 preflight_checks
 
 if [[ "${SKIP_WEEK4_CHECKS}" == "false" ]]; then
-  log "running week 4 day 19 scaffold checks"
-  run_week4_day19_checks
+  log "running week 4 day 20 scaffold checks"
+  run_week4_day20_checks
 else
   log "skipping week 4 checks (--skip-week4-checks/--skip-week3-checks)"
 fi

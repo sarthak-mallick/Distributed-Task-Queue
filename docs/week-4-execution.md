@@ -47,7 +47,7 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
 | W4-001 | Completed | 2026-02-19 | Day 17 completed: API + worker expose Prometheus `/metrics`; runtime counters validated in canonical e2e. |
 | W4-002 | Completed | 2026-02-19 | Day 17 completed: AKS monitoring manifests for Prometheus/Grafana added and render checks integrated. |
 | W4-003 | Completed | 2026-02-20 | Day 18-19 completed: retry/backoff hardening plus shutdown-drain sequencing implemented and validated. |
-| W4-004 | Pending | 2026-02-19 | Planned for Week 4 closure after hardening tasks. |
+| W4-004 | Completed | 2026-02-20 | Day 20 completed: dashboard + alert provisioning and final runbook/e2e acceptance closure delivered. |
 
 ## Implementation Order
 
@@ -112,11 +112,23 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
   - `kubectl kustomize infra/aks/base` passed
   - `ACR_LOGIN_SERVER=example.azurecr.io IMAGE_TAG=day19-check DRY_RUN=true K8S_NAMESPACE=dtq bash infra/aks/scripts/deploy-release.sh` passed
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220232132`)
+- 2026-02-20: Started Day 20 `W4-004` final closure slice (Grafana dashboard provisioning + Prometheus alert rules + runbook/e2e polish).
+- 2026-02-20: Completed Day 20 `W4-004` closure:
+  - Added Prometheus alert rules config map and rule-file wiring in monitoring manifests.
+  - Added Grafana datasource/dashboard provisioning with `DTQ Operational Overview` dashboard.
+  - Updated canonical e2e Week 4 checks for Day 20 dashboard/alert provisioning markers.
+- 2026-02-20: Day 20 validation evidence:
+  - `go test ./...` (api) passed
+  - `go test ./...` (worker) passed
+  - `kubectl kustomize infra/aks/base` passed
+  - `kubectl kustomize infra/aks/monitoring` passed
+  - `ACR_LOGIN_SERVER=example.azurecr.io IMAGE_TAG=day20-check DRY_RUN=true K8S_NAMESPACE=dtq bash infra/aks/scripts/deploy-release.sh` passed
+  - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220232828`)
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 19 complete)
-- Completed tasks: W4-001, W4-002, W4-003
+- Week status: Completed (Week 4 closed through Day 20)
+- Completed tasks: W4-001, W4-002, W4-003, W4-004
 - In-progress tasks: None
 - Blockers: None
-- Next task: Start Day 20 `W4-004` final polish and acceptance closure.
+- Next task: Await user direction for post-Week-4 scope.

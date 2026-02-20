@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dtq-prometheus-rules
+  labels:
+    app: dtq-prometheus
+data:
+  alerts.yml: |
+    groups:
+      - name: dtq-api-alerts
+        rules:
+          - alert: DTQAPIGraphQLFailureRateHigh
+            expr: |
+              (
+                sum(rate(dtq_api_graphql_http_failures_total[5m])) /
+                clamp_min(sum(rate(dtq_api_graphql_http_requests_total[5m])), 1)
+              ) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+              service: api
+            annotations:
+              summary: "DTQ API GraphQL failure rate is high"
+              description: "GraphQL failure ratio has exceeded 5% over the last 10 minutes."
+      - name: dtq-worker-alerts
+        rules:
+          - alert: DTQWorkerJobFailuresDetected
+            expr: increase(dtq_worker_job_failed_total[10m]) > 0
+            for: 5m
+            labels:
+              severity: warning
+              service: worker
+            annotations:
+              summary: "DTQ worker job failures detected"
+              description: "One or more worker job attempts failed in the last 10 minutes."
+          - alert: DTQWorkerShutdownDrainTimeoutDetected
+            expr: increase(dtq_worker_shutdown_drain_timeouts_total[15m]) > 0
+            for: 1m
+            labels:
+              severity: critical
+              service: worker
+            annotations:
+              summary: "DTQ worker shutdown drain timeout detected"
+              description: "Worker shutdown drain timed out while in-flight jobs were present."

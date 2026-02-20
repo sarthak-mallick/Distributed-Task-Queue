@@ -12,6 +12,7 @@ resources:
   - api-service.yaml
   - worker-deployment.yaml
   - worker-service.yaml
+  - worker-metrics-service.yaml
   - ui-deployment.yaml
   - ui-service.yaml
 

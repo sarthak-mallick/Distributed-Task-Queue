@@ -334,9 +334,10 @@ func (a *app) close() {
 
 // routes registers HTTP endpoints.
 func (a *app) routes() http.Handler {
-	a.logger.Println("registering routes: GET /healthz, POST /graphql, GET /graphql/ws, legacy /v1/jobs disabled")
+	a.logger.Println("registering routes: GET /healthz, GET /metrics, POST /graphql, GET /graphql/ws, legacy /v1/jobs disabled")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.handleHealthz)
+	mux.HandleFunc("/metrics", a.handleMetrics)
 	mux.HandleFunc("/graphql", a.handleGraphQL)
 	mux.HandleFunc("/graphql/ws", a.handleGraphQLWebSocket)
 	mux.HandleFunc("/v1/jobs", a.handleLegacyRESTDisabled)
@@ -446,6 +447,21 @@ func (a *app) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		},
 		"time": time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// handleMetrics serves API Prometheus metrics for monitoring scrapes.
+func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	a.logger.Printf("metrics request method=%s", r.Method)
+	if r.Method != http.MethodGet {
+		a.logger.Printf("metrics rejected method=%s", r.Method)
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if _, err := io.WriteString(w, apiMetricsState.renderPrometheus()); err != nil {
+		a.logger.Printf("metrics response write failed: %v", err)
+	}
 }
 
 // handleSubmitJob accepts generic job submissions.

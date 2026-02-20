@@ -20,6 +20,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9090
+            - containerPort: 2112
           envFrom:
             - configMapRef:
                 name: dtq-worker-config
@@ -28,6 +29,8 @@ spec:
           env:
             - name: WORKER_GRPC_ADDR
               value: ":9090"
+            - name: WORKER_METRICS_ADDR
+              value: ":2112"
           readinessProbe:
             tcpSocket:
               port: 9090

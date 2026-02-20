@@ -2,17 +2,19 @@
 
 Baseline Kubernetes manifests for Week 3 AKS deployment.
 
-## Current Scope (Day 16)
+## Current Scope (Day 17)
 
 - Base namespace
 - Runtime config and secret wiring for API/worker workloads
 - API deployment + service
 - Worker deployment
 - Worker gRPC service for API-to-worker calls
+- Worker metrics service for Prometheus scraping
 - UI deployment + service
 - Kustomization entrypoint for image overrides
 - Release deployment helper for shared image tag rollout
 - Dry-run deploy-helper validation path for local readiness checks
+- Monitoring kustomization for Prometheus and Grafana (`infra/aks/monitoring`)
 
 ## Notes
 
@@ -25,6 +27,8 @@ Baseline Kubernetes manifests for Week 3 AKS deployment.
 - `dtq-api-config` and `dtq-worker-config` are non-sensitive defaults and contract keys.
 - `dtq-runtime-secrets` is a placeholder secret manifest and must be replaced with real values before cloud deployment.
 - Redis/Mongo/Kafka are still out of this base set; manifests assume managed/cloud equivalents or separate workload manifests.
+- Monitoring stack render path:
+  - `kubectl kustomize infra/aks/monitoring`
 
 ## Render Example
 

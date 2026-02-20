@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dtq-worker-metrics
+  labels:
+    app: dtq-worker
+spec:
+  selector:
+    app: dtq-worker
+  ports:
+    - name: metrics
+      port: 2112
+      targetPort: 2112
+  type: ClusterIP

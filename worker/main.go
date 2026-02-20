@@ -65,6 +65,7 @@ type config struct {
 	progressConsumerPrefetch int
 	progressReconnectBackoff time.Duration
 	grpcListenAddr           string
+	metricsListenAddr        string
 	grpcPollInterval         time.Duration
 
 	weatherProvider        string
@@ -109,6 +110,8 @@ type worker struct {
 	rabbitConn  *amqp.Connection
 	rabbitChan  *amqp.Channel
 	grpcServer  *grpc.Server
+	metrics     *workerMetrics
+	metricsHTTP *http.Server
 	statusStore statusStore
 	resultStore resultStore
 	weather     weatherClient
@@ -380,6 +383,7 @@ func loadConfig() (config, error) {
 		progressConsumerPrefetch: progressConsumerPrefetch,
 		progressReconnectBackoff: progressReconnectBackoff,
 		grpcListenAddr:           envOrDefault("WORKER_GRPC_ADDR", ":9090"),
+		metricsListenAddr:        envOrDefault("WORKER_METRICS_ADDR", ":2112"),
 		grpcPollInterval:         grpcPollInterval,
 
 		weatherProvider:        strings.ToLower(envOrDefault("WEATHER_PROVIDER", "openmeteo")),
@@ -394,7 +398,7 @@ func loadConfig() (config, error) {
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_metrics_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -406,6 +410,7 @@ func loadConfig() (config, error) {
 		cfg.mongoCollection,
 		cfg.progressRequestQueue,
 		cfg.grpcListenAddr,
+		cfg.metricsListenAddr,
 		cfg.grpcPollInterval,
 		cfg.weatherProvider,
 		cfg.weatherMaxAttempts,
@@ -515,6 +520,7 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 		rabbitConn:  rabbitConn,
 		rabbitChan:  rabbitChan,
 		grpcServer:  grpcServer,
+		metrics:     &workerMetrics{},
 		statusStore: &redisHashStatusStore{client: redisClient, ttl: cfg.statusTTL, logger: logger},
 		resultStore: resultStore,
 		weather:     weatherClient,
@@ -529,11 +535,12 @@ func newWorker(cfg config, logger *log.Logger) (*worker, error) {
 	}
 
 	logger.Printf(
-		"worker initialized topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s",
+		"worker initialized topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s metrics_addr=%s",
 		cfg.kafkaTopics,
 		cfg.kafkaGroupID,
 		cfg.progressRequestQueue,
 		cfg.grpcListenAddr,
+		cfg.metricsListenAddr,
 	)
 	return w, nil
 }
@@ -552,6 +559,13 @@ func configureProgressChannel(ch *amqp.Channel, cfg config) error {
 // close releases Kafka, Redis, and MongoDB resources during shutdown.
 func (w *worker) close() {
 	w.logger.Println("closing worker dependencies")
+	if w.metricsHTTP != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.metricsHTTP.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			w.logger.Printf("metrics http shutdown failed: %v", err)
+		}
+	}
 	if w.grpcServer != nil {
 		w.grpcServer.GracefulStop()
 	}
@@ -583,12 +597,17 @@ func (w *worker) close() {
 // run starts the long-running fetch/process loop until context cancellation.
 func (w *worker) run(ctx context.Context) error {
 	w.logger.Printf(
-		"worker loops starting topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s",
+		"worker loops starting topics=%v group_id=%s progress_request_queue=%s grpc_addr=%s metrics_addr=%s",
 		w.cfg.kafkaTopics,
 		w.cfg.kafkaGroupID,
 		w.cfg.progressRequestQueue,
 		w.cfg.grpcListenAddr,
+		w.cfg.metricsListenAddr,
 	)
+
+	if err := w.startMetricsServer(ctx); err != nil {
+		return err
+	}
 
 	if err := w.startGRPCServer(ctx); err != nil {
 		return err
@@ -630,6 +649,64 @@ func (w *worker) startGRPCServer(ctx context.Context) error {
 	return nil
 }
 
+// startMetricsServer starts worker's Prometheus metrics endpoint and shuts it down on cancel.
+func (w *worker) startMetricsServer(ctx context.Context) error {
+	if w.metrics == nil {
+		return errors.New("worker metrics registry is not configured")
+	}
+
+	listener, err := net.Listen("tcp", w.cfg.metricsListenAddr)
+	if err != nil {
+		return fmt.Errorf("metrics listen failed addr=%s: %w", w.cfg.metricsListenAddr, err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", w.handleMetrics)
+
+	metricsServer := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	w.metricsHTTP = metricsServer
+
+	go func() {
+		<-ctx.Done()
+		w.metrics.recordGracefulShutdownRequest()
+		w.logger.Println("metrics server shutdown requested")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			w.logger.Printf("metrics server shutdown failed: %v", err)
+		}
+		_ = listener.Close()
+	}()
+
+	go func() {
+		w.logger.Printf("metrics server listening addr=%s", w.cfg.metricsListenAddr)
+		if err := metricsServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			w.logger.Printf("metrics server stopped with error: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+// handleMetrics serves worker Prometheus metrics for monitoring scrapes.
+func (w *worker) handleMetrics(resp http.ResponseWriter, req *http.Request) {
+	w.logger.Printf("worker metrics request method=%s", req.Method)
+	if req.Method != http.MethodGet {
+		w.logger.Printf("worker metrics rejected method=%s", req.Method)
+		resp.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = resp.Write([]byte(`{"error":"method not allowed"}`))
+		return
+	}
+
+	resp.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if _, err := resp.Write([]byte(w.metrics.renderPrometheus())); err != nil {
+		w.logger.Printf("worker metrics response write failed: %v", err)
+	}
+}
+
 // runKafkaLoop consumes Kafka messages until cancellation and applies job handlers.
 func (w *worker) runKafkaLoop(ctx context.Context) error {
 	for {
@@ -638,6 +715,9 @@ func (w *worker) runKafkaLoop(ctx context.Context) error {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				w.logger.Println("kafka consumer loop stopping due to cancellation")
 				return nil
+			}
+			if w.metrics != nil {
+				w.metrics.recordKafkaFetchError()
 			}
 			w.logger.Printf("kafka fetch failed err=%v; retrying after=%s", err, w.cfg.fetchErrBackoff)
 			if err := sleepWithContext(ctx, w.cfg.fetchErrBackoff); err != nil {
@@ -759,6 +839,9 @@ func (w *worker) reopenProgressChannel() error {
 
 // handleProgressDelivery validates one status request and publishes the correlated reply.
 func (w *worker) handleProgressDelivery(ctx context.Context, d amqp.Delivery) (ack bool, requeue bool) {
+	if w.metrics != nil {
+		w.metrics.recordRabbitProgressRequest()
+	}
 	correlationID := strings.TrimSpace(d.CorrelationId)
 	replyTo := strings.TrimSpace(d.ReplyTo)
 	if correlationID == "" || replyTo == "" {
@@ -867,6 +950,9 @@ func (w *worker) buildProgressReply(ctx context.Context, jobID string) (progress
 
 // GetJobStatus returns a single status snapshot for API gRPC callers.
 func (w *worker) GetJobStatus(ctx context.Context, req *apiworkergrpc.GetJobStatusRequest) (*apiworkergrpc.JobStatusReply, error) {
+	if w.metrics != nil {
+		w.metrics.recordGRPCStatusRequest()
+	}
 	if req == nil {
 		return nil, errors.New("request is required")
 	}
@@ -884,6 +970,9 @@ func (w *worker) GetJobStatus(ctx context.Context, req *apiworkergrpc.GetJobStat
 
 // SubscribeJobProgress streams status changes until a terminal job state.
 func (w *worker) SubscribeJobProgress(req *apiworkergrpc.SubscribeJobProgressRequest, stream apiworkergrpc.APIWorker_SubscribeJobProgressServer) error {
+	if w.metrics != nil {
+		w.metrics.recordGRPCSubscription()
+	}
 	if req == nil {
 		return errors.New("request is required")
 	}
@@ -977,6 +1066,9 @@ func (w *worker) readJobStatus(ctx context.Context, jobID string) (map[string]st
 func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) error {
 	job, err := decodeKafkaJobMessage(msg.Value)
 	if err != nil {
+		if w.metrics != nil {
+			w.metrics.recordDroppedMessage()
+		}
 		w.logger.Printf(
 			"dropping invalid message topic=%s partition=%d offset=%d key=%s err=%v",
 			msg.Topic,
@@ -990,6 +1082,9 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 
 	handler, ok := w.handlers[job.JobType]
 	if !ok {
+		if w.metrics != nil {
+			w.metrics.recordDroppedMessage()
+		}
 		w.logger.Printf(
 			"dropping unsupported job_type job_id=%s trace_id=%s job_type=%s",
 			job.JobID,
@@ -1001,6 +1096,15 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 
 	processCtx, cancel := context.WithTimeout(ctx, w.cfg.processTimeout)
 	defer cancel()
+
+	jobStartedAt := time.Now().UTC()
+	jobOutcome := "failed"
+	if w.metrics != nil {
+		w.metrics.recordJobAttemptStart()
+		defer func() {
+			w.metrics.recordJobAttemptEnd(jobOutcome, time.Since(jobStartedAt))
+		}()
+	}
 
 	startedAt := time.Now().UTC()
 	w.logger.Printf("processing started job_id=%s trace_id=%s job_type=%s", job.JobID, job.TraceID, job.JobType)
@@ -1065,6 +1169,7 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		return err
 	}
 
+	jobOutcome = "completed"
 	w.logger.Printf("processing completed job_id=%s trace_id=%s job_type=%s", job.JobID, job.TraceID, job.JobType)
 	return nil
 }

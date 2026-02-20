@@ -20,6 +20,13 @@ type workerMetrics struct {
 	grpcSubscriptionsTotal        atomic.Uint64
 	rabbitProgressRequestsTotal   atomic.Uint64
 	gracefulShutdownRequestsTotal atomic.Uint64
+	shutdownSignalsTotal          atomic.Uint64
+	shutdownDrainCompletionsTotal atomic.Uint64
+	shutdownDrainTimeoutsTotal    atomic.Uint64
+	statusWriteRetriesTotal       atomic.Uint64
+	statusWriteFailuresTotal      atomic.Uint64
+	resultWriteRetriesTotal       atomic.Uint64
+	resultWriteFailuresTotal      atomic.Uint64
 	currentJobsInFlight           atomic.Int64
 }
 
@@ -72,6 +79,46 @@ func (m *workerMetrics) recordGracefulShutdownRequest() {
 	m.gracefulShutdownRequestsTotal.Add(1)
 }
 
+// recordShutdownSignal increments top-level worker shutdown signal counters.
+func (m *workerMetrics) recordShutdownSignal() {
+	m.shutdownSignalsTotal.Add(1)
+}
+
+// recordShutdownDrainCompletion increments worker shutdown-drain completion counters.
+func (m *workerMetrics) recordShutdownDrainCompletion() {
+	m.shutdownDrainCompletionsTotal.Add(1)
+}
+
+// recordShutdownDrainTimeout increments worker shutdown-drain timeout counters.
+func (m *workerMetrics) recordShutdownDrainTimeout() {
+	m.shutdownDrainTimeoutsTotal.Add(1)
+}
+
+// recordStatusWriteRetry increments retry counters for Redis status writes.
+func (m *workerMetrics) recordStatusWriteRetry() {
+	m.statusWriteRetriesTotal.Add(1)
+}
+
+// recordStatusWriteFailure increments terminal failure counters for Redis status writes.
+func (m *workerMetrics) recordStatusWriteFailure() {
+	m.statusWriteFailuresTotal.Add(1)
+}
+
+// recordResultWriteRetry increments retry counters for Mongo result writes.
+func (m *workerMetrics) recordResultWriteRetry() {
+	m.resultWriteRetriesTotal.Add(1)
+}
+
+// recordResultWriteFailure increments terminal failure counters for Mongo result writes.
+func (m *workerMetrics) recordResultWriteFailure() {
+	m.resultWriteFailuresTotal.Add(1)
+}
+
+// jobsInFlight reports the current number of in-flight worker jobs.
+func (m *workerMetrics) jobsInFlight() int64 {
+	return m.currentJobsInFlight.Load()
+}
+
 // renderPrometheus renders Prometheus text exposition for worker counters.
 func (m *workerMetrics) renderPrometheus() string {
 	durationSumSeconds := float64(m.jobDurationNanosTotal.Load()) / float64(time.Second)
@@ -90,6 +137,13 @@ func (m *workerMetrics) renderPrometheus() string {
 	writeWorkerCounterMetric(&b, "dtq_worker_grpc_subscriptions_total", "Total worker SubscribeJobProgress gRPC requests.", m.grpcSubscriptionsTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_rabbit_progress_requests_total", "Total worker RabbitMQ progress requests handled.", m.rabbitProgressRequestsTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_graceful_shutdown_requests_total", "Total worker graceful shutdown requests received.", m.gracefulShutdownRequestsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_signals_total", "Total worker shutdown signals observed by main runtime loop.", m.shutdownSignalsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_drain_completions_total", "Total worker shutdown drain completions before service stop.", m.shutdownDrainCompletionsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_drain_timeouts_total", "Total worker shutdown drain timeouts before service stop.", m.shutdownDrainTimeoutsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_status_write_retries_total", "Total retry attempts for worker Redis status writes.", m.statusWriteRetriesTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_status_write_failures_total", "Total terminal failures for worker Redis status writes.", m.statusWriteFailuresTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_result_write_retries_total", "Total retry attempts for worker Mongo result writes.", m.resultWriteRetriesTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_result_write_failures_total", "Total terminal failures for worker Mongo result writes.", m.resultWriteFailuresTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_job_duration_seconds_count", "Total worker job-duration samples.", m.jobDurationSamplesTotal.Load())
 	b.WriteString("# HELP dtq_worker_jobs_in_flight Current in-flight worker jobs.\n")
 	b.WriteString("# TYPE dtq_worker_jobs_in_flight gauge\n")

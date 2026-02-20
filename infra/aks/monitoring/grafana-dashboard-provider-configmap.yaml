@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dtq-grafana-dashboard-provider
+  labels:
+    app: dtq-grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: dtq-week4
+        orgId: 1
+        folder: "DTQ"
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards

@@ -76,6 +76,14 @@ type config struct {
 	weatherMaxAttempts     int
 	weatherRetryInitialBO  time.Duration
 	weatherRetryMaxBO      time.Duration
+
+	statusWriteMaxAttempts    int
+	statusWriteInitialBackoff time.Duration
+	statusWriteMaxBackoff     time.Duration
+	resultWriteMaxAttempts    int
+	resultWriteInitialBackoff time.Duration
+	resultWriteMaxBackoff     time.Duration
+	shutdownDrainTimeout      time.Duration
 }
 
 // kafkaConsumer abstracts kafka.Reader for testability of commit behavior.
@@ -348,6 +356,50 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	statusWriteMaxAttempts, err := parseIntEnv("WORKER_STATUS_WRITE_MAX_ATTEMPTS", 3)
+	if err != nil {
+		return config{}, err
+	}
+	if statusWriteMaxAttempts < 1 {
+		return config{}, errors.New("WORKER_STATUS_WRITE_MAX_ATTEMPTS must be >= 1")
+	}
+
+	statusWriteInitialBackoff, err := parseDurationEnv("WORKER_STATUS_WRITE_INITIAL_BACKOFF", 200*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
+	statusWriteMaxBackoff, err := parseDurationEnv("WORKER_STATUS_WRITE_MAX_BACKOFF", 2*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
+	resultWriteMaxAttempts, err := parseIntEnv("WORKER_RESULT_WRITE_MAX_ATTEMPTS", 3)
+	if err != nil {
+		return config{}, err
+	}
+	if resultWriteMaxAttempts < 1 {
+		return config{}, errors.New("WORKER_RESULT_WRITE_MAX_ATTEMPTS must be >= 1")
+	}
+
+	resultWriteInitialBackoff, err := parseDurationEnv("WORKER_RESULT_WRITE_INITIAL_BACKOFF", 200*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
+	resultWriteMaxBackoff, err := parseDurationEnv("WORKER_RESULT_WRITE_MAX_BACKOFF", 2*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
+	shutdownDrainTimeout, err := parseDurationEnv("WORKER_SHUTDOWN_DRAIN_TIMEOUT", 20*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+	if shutdownDrainTimeout <= 0 {
+		return config{}, errors.New("WORKER_SHUTDOWN_DRAIN_TIMEOUT must be > 0")
+	}
+
 	jobTypes, err := normalizeJobTypes(parseCSVEnv("WORKER_JOB_TYPES", []string{"weather"}))
 	if err != nil {
 		return config{}, err
@@ -394,11 +446,19 @@ func loadConfig() (config, error) {
 		weatherMaxAttempts:     weatherMaxAttempts,
 		weatherRetryInitialBO:  weatherRetryInitialBackoff,
 		weatherRetryMaxBO:      weatherRetryMaxBackoff,
+
+		statusWriteMaxAttempts:    statusWriteMaxAttempts,
+		statusWriteInitialBackoff: statusWriteInitialBackoff,
+		statusWriteMaxBackoff:     statusWriteMaxBackoff,
+		resultWriteMaxAttempts:    resultWriteMaxAttempts,
+		resultWriteInitialBackoff: resultWriteInitialBackoff,
+		resultWriteMaxBackoff:     resultWriteMaxBackoff,
+		shutdownDrainTimeout:      shutdownDrainTimeout,
 	}
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_metrics_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_metrics_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d status_write_max_attempts=%d result_write_max_attempts=%d shutdown_drain_timeout=%s",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -414,6 +474,9 @@ func loadConfig() (config, error) {
 		cfg.grpcPollInterval,
 		cfg.weatherProvider,
 		cfg.weatherMaxAttempts,
+		cfg.statusWriteMaxAttempts,
+		cfg.resultWriteMaxAttempts,
+		cfg.shutdownDrainTimeout,
 	)
 	return cfg, nil
 }
@@ -605,21 +668,76 @@ func (w *worker) run(ctx context.Context) error {
 		w.cfg.metricsListenAddr,
 	)
 
-	if err := w.startMetricsServer(ctx); err != nil {
+	serviceCtx, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+
+	fetchCtx, cancelFetch := context.WithCancel(context.Background())
+	defer cancelFetch()
+
+	if err := w.startMetricsServer(serviceCtx); err != nil {
 		return err
 	}
 
-	if err := w.startGRPCServer(ctx); err != nil {
+	if err := w.startGRPCServer(serviceCtx); err != nil {
 		return err
 	}
 
+	if w.rabbitConn != nil {
+		go func() {
+			if err := w.runProgressResponder(serviceCtx); err != nil && serviceCtx.Err() == nil {
+				w.logger.Printf("progress responder stopped with error: %v", err)
+			}
+		}()
+	} else {
+		w.logger.Println("progress responder disabled: rabbitmq connection is not configured")
+	}
+
+	kafkaDone := make(chan error, 1)
 	go func() {
-		if err := w.runProgressResponder(ctx); err != nil && ctx.Err() == nil {
-			w.logger.Printf("progress responder stopped with error: %v", err)
-		}
+		kafkaDone <- w.runKafkaLoop(fetchCtx)
 	}()
 
-	return w.runKafkaLoop(ctx)
+	select {
+	case err := <-kafkaDone:
+		cancelServices()
+		return err
+	case <-ctx.Done():
+		inFlight := int64(0)
+		if w.metrics != nil {
+			w.metrics.recordShutdownSignal()
+			inFlight = w.metrics.jobsInFlight()
+		}
+		w.logger.Printf("worker shutdown signal received in_flight_jobs=%d", inFlight)
+		cancelFetch()
+		err := w.waitForKafkaLoopDrain(kafkaDone, w.cfg.shutdownDrainTimeout)
+		cancelServices()
+		return err
+	}
+}
+
+// waitForKafkaLoopDrain waits for kafka loop completion or times out while preserving shutdown observability.
+func (w *worker) waitForKafkaLoopDrain(kafkaDone <-chan error, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-kafkaDone:
+		if err != nil {
+			return err
+		}
+		if w.metrics != nil {
+			w.metrics.recordShutdownDrainCompletion()
+		}
+		w.logger.Printf("worker shutdown drain completed timeout=%s", timeout)
+		return nil
+	case <-timer.C:
+		inFlight := int64(0)
+		if w.metrics != nil {
+			w.metrics.recordShutdownDrainTimeout()
+			inFlight = w.metrics.jobsInFlight()
+		}
+		return fmt.Errorf("worker shutdown drain timed out timeout=%s in_flight_jobs=%d", timeout, inFlight)
+	}
 }
 
 // startGRPCServer starts worker's gRPC status service and shuts it down on context cancel.
@@ -1094,7 +1212,7 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		return w.commitMessage(msg, "drop-unsupported-job-type")
 	}
 
-	processCtx, cancel := context.WithTimeout(ctx, w.cfg.processTimeout)
+	processCtx, cancel := context.WithTimeout(context.Background(), w.cfg.processTimeout)
 	defer cancel()
 
 	jobStartedAt := time.Now().UTC()
@@ -1147,7 +1265,7 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		TraceID:       job.TraceID,
 	}
 
-	inserted, err := w.resultStore.UpsertJobResult(processCtx, doc)
+	inserted, err := w.upsertJobResultWithRetry(processCtx, job, doc)
 	if err != nil {
 		return fmt.Errorf("mongo upsert failed: %w", err)
 	}
@@ -1191,13 +1309,160 @@ func (w *worker) updateStatus(ctx context.Context, job kafkaJobMessage, state st
 		ErrorMessage:    errorMessage,
 	}
 
-	if err := w.statusStore.UpsertStatus(ctx, record); err != nil {
+	if err := w.upsertStatusWithRetry(ctx, record); err != nil {
 		w.logger.Printf("status store write failed job_id=%s trace_id=%s state=%s progress=%d err=%v", job.JobID, job.TraceID, state, progress, err)
 		return err
 	}
 
 	w.logger.Printf("status updated job_id=%s trace_id=%s state=%s progress=%d", job.JobID, job.TraceID, state, progress)
 	return nil
+}
+
+// upsertStatusWithRetry writes one status update with bounded retry/backoff for transient failures.
+func (w *worker) upsertStatusWithRetry(ctx context.Context, record jobStatusRecord) error {
+	if w.statusStore == nil {
+		return errors.New("status store is not configured")
+	}
+
+	return w.retryOperation(
+		ctx,
+		w.cfg.statusWriteMaxAttempts,
+		w.cfg.statusWriteInitialBackoff,
+		w.cfg.statusWriteMaxBackoff,
+		func(attempt int, err error, retryIn time.Duration) {
+			if w.metrics != nil {
+				w.metrics.recordStatusWriteRetry()
+			}
+			w.logger.Printf(
+				"status write retrying job_id=%s trace_id=%s state=%s progress=%d attempt=%d max_attempts=%d retry_in=%s err=%v",
+				record.JobID,
+				record.TraceID,
+				record.State,
+				record.ProgressPercent,
+				attempt,
+				w.cfg.statusWriteMaxAttempts,
+				retryIn,
+				err,
+			)
+		},
+		func(attempts int, err error) {
+			if w.metrics != nil {
+				w.metrics.recordStatusWriteFailure()
+			}
+			w.logger.Printf(
+				"status write exhausted retries job_id=%s trace_id=%s state=%s progress=%d attempts=%d err=%v",
+				record.JobID,
+				record.TraceID,
+				record.State,
+				record.ProgressPercent,
+				attempts,
+				err,
+			)
+		},
+		func() error {
+			return w.statusStore.UpsertStatus(ctx, record)
+		},
+	)
+}
+
+// upsertJobResultWithRetry writes final Mongo results with bounded retry/backoff for transient failures.
+func (w *worker) upsertJobResultWithRetry(ctx context.Context, job kafkaJobMessage, doc jobResultDocument) (bool, error) {
+	if w.resultStore == nil {
+		return false, errors.New("result store is not configured")
+	}
+
+	inserted := false
+	err := w.retryOperation(
+		ctx,
+		w.cfg.resultWriteMaxAttempts,
+		w.cfg.resultWriteInitialBackoff,
+		w.cfg.resultWriteMaxBackoff,
+		func(attempt int, err error, retryIn time.Duration) {
+			if w.metrics != nil {
+				w.metrics.recordResultWriteRetry()
+			}
+			w.logger.Printf(
+				"result write retrying job_id=%s trace_id=%s job_type=%s attempt=%d max_attempts=%d retry_in=%s err=%v",
+				job.JobID,
+				job.TraceID,
+				job.JobType,
+				attempt,
+				w.cfg.resultWriteMaxAttempts,
+				retryIn,
+				err,
+			)
+		},
+		func(attempts int, err error) {
+			if w.metrics != nil {
+				w.metrics.recordResultWriteFailure()
+			}
+			w.logger.Printf(
+				"result write exhausted retries job_id=%s trace_id=%s job_type=%s attempts=%d err=%v",
+				job.JobID,
+				job.TraceID,
+				job.JobType,
+				attempts,
+				err,
+			)
+		},
+		func() error {
+			var err error
+			inserted, err = w.resultStore.UpsertJobResult(ctx, doc)
+			return err
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
+// retryOperation executes one operation with bounded retry/backoff for transient worker store errors.
+func (w *worker) retryOperation(
+	ctx context.Context,
+	maxAttempts int,
+	initialBackoff time.Duration,
+	maxBackoff time.Duration,
+	onRetry func(attempt int, err error, retryIn time.Duration),
+	onFailure func(attempts int, err error),
+	op func() error,
+) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		err := op()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if !isRetryableWorkerStoreError(err) || attempt >= maxAttempts {
+			break
+		}
+
+		backoff := calculateRetryBackoff(initialBackoff, maxBackoff, attempt)
+		if onRetry != nil {
+			onRetry(attempt, err, backoff)
+		}
+		if err := sleepWithContext(ctx, backoff); err != nil {
+			return err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("operation failed with unknown error")
+	}
+	if onFailure != nil {
+		onFailure(maxAttempts, lastErr)
+	}
+	return lastErr
 }
 
 // commitMessage records consumer progress only after a message reaches a terminal outcome.
@@ -1227,6 +1492,14 @@ func (w *worker) commitMessage(msg kafka.Message, reason string) error {
 		string(msg.Key),
 	)
 	return nil
+}
+
+// isRetryableWorkerStoreError classifies transient status/result write failures worth retrying.
+func isRetryableWorkerStoreError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // handleWeatherJob validates weather payload, calls provider, and returns normalized output.

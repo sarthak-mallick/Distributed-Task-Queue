@@ -25,3 +25,23 @@ spec:
               value: admin
           ports:
             - containerPort: 3000
+          volumeMounts:
+            - name: grafana-datasources
+              mountPath: /etc/grafana/provisioning/datasources/datasource.yaml
+              subPath: datasource.yaml
+            - name: grafana-dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: grafana-dashboard-overview
+              mountPath: /var/lib/grafana/dashboards/dtq-overview.json
+              subPath: dtq-overview.json
+      volumes:
+        - name: grafana-datasources
+          configMap:
+            name: dtq-grafana-datasources
+        - name: grafana-dashboard-provider
+          configMap:
+            name: dtq-grafana-dashboard-provider
+        - name: grafana-dashboard-overview
+          configMap:
+            name: dtq-grafana-dashboard-overview

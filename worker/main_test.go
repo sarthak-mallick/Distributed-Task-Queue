@@ -6,11 +6,13 @@ import (
 	"errors"
 	"log"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"distributed-task-queue/worker/internal/apiworkergrpc"
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/grpc"
 )
 
 // fakeConsumer is a test double for commit assertions.
@@ -38,6 +40,49 @@ func (f *fakeConsumer) Close() error {
 	return nil
 }
 
+// scriptedConsumer returns scripted fetch messages and then blocks until cancellation.
+type scriptedConsumer struct {
+	messages    []kafka.Message
+	nextIndex   int
+	commitCalls int
+	mu          sync.Mutex
+}
+
+// FetchMessage returns scripted messages in sequence, then waits for cancellation.
+func (c *scriptedConsumer) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	c.mu.Lock()
+	if c.nextIndex < len(c.messages) {
+		msg := c.messages[c.nextIndex]
+		c.nextIndex++
+		c.mu.Unlock()
+		return msg, nil
+	}
+	c.mu.Unlock()
+
+	<-ctx.Done()
+	return kafka.Message{}, ctx.Err()
+}
+
+// CommitMessages records commit calls for sequencing assertions.
+func (c *scriptedConsumer) CommitMessages(_ context.Context, _ ...kafka.Message) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commitCalls++
+	return nil
+}
+
+// Close satisfies the kafkaConsumer interface.
+func (c *scriptedConsumer) Close() error {
+	return nil
+}
+
+// commitCount returns the number of commit calls recorded by the scripted consumer.
+func (c *scriptedConsumer) commitCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.commitCalls
+}
+
 // noOpStatusStore is a status store stub for process tests.
 type noOpStatusStore struct{}
 
@@ -51,6 +96,38 @@ type noOpResultStore struct{}
 
 // UpsertJobResult accepts result writes without side effects.
 func (s noOpResultStore) UpsertJobResult(context.Context, jobResultDocument) (bool, error) {
+	return true, nil
+}
+
+// flakyStatusStore fails for a fixed number of calls before succeeding.
+type flakyStatusStore struct {
+	failuresRemaining int
+	calls             int
+}
+
+// UpsertStatus returns transient failures until the configured failure budget is exhausted.
+func (s *flakyStatusStore) UpsertStatus(context.Context, jobStatusRecord) error {
+	s.calls++
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return errors.New("transient redis write failure")
+	}
+	return nil
+}
+
+// flakyResultStore fails for a fixed number of calls before succeeding.
+type flakyResultStore struct {
+	failuresRemaining int
+	calls             int
+}
+
+// UpsertJobResult returns transient failures until the configured failure budget is exhausted.
+func (s *flakyResultStore) UpsertJobResult(context.Context, jobResultDocument) (bool, error) {
+	s.calls++
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return false, errors.New("transient mongo write failure")
+	}
 	return true, nil
 }
 
@@ -198,6 +275,310 @@ func TestProcessFetchedMessageCommitsInvalidEnvelope(t *testing.T) {
 	}
 	if consumer.commitCalls != 1 {
 		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+}
+
+// TestProcessFetchedMessageCompletesAfterParentCancel verifies in-flight processing is isolated from parent shutdown cancellation.
+func TestProcessFetchedMessageCompletesAfterParentCancel(t *testing.T) {
+	t.Parallel()
+
+	consumer := &fakeConsumer{}
+	w := &worker{
+		cfg: config{
+			processTimeout: time.Second,
+			commitTimeout:  time.Second,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		consumer:    consumer,
+		statusStore: noOpStatusStore{},
+		resultStore: noOpResultStore{},
+		handlers: map[string]jobHandler{
+			"weather": func(context.Context, kafkaJobMessage) (jobExecutionResult, error) {
+				return jobExecutionResult{
+					Input:   map[string]any{"city": "Austin"},
+					Output:  map[string]any{"temperature": 21.2},
+					Message: "ok",
+				}, nil
+			},
+		},
+	}
+
+	msg := kafka.Message{
+		Topic: "jobs.weather.v1",
+		Key:   []byte("job-4"),
+		Value: mustKafkaMessage(t, kafkaJobMessage{
+			SchemaVersion: "1.0",
+			JobID:         "job-4",
+			JobType:       "weather",
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			TraceID:       "trace-4",
+			Payload:       mustJSON(t, map[string]any{"city": "Austin", "units": "metric"}),
+		}),
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.processFetchedMessage(canceledCtx, msg); err != nil {
+		t.Fatalf("processFetchedMessage(canceledCtx) error = %v", err)
+	}
+	if consumer.commitCalls != 1 {
+		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+}
+
+// TestUpsertStatusWithRetryRecovers verifies transient status-write failures are retried and recovered.
+func TestUpsertStatusWithRetryRecovers(t *testing.T) {
+	t.Parallel()
+
+	statusStore := &flakyStatusStore{failuresRemaining: 2}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			statusWriteMaxAttempts:    4,
+			statusWriteInitialBackoff: 0,
+			statusWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		statusStore: statusStore,
+		metrics:     metrics,
+	}
+
+	err := w.upsertStatusWithRetry(context.Background(), jobStatusRecord{
+		JobID:           "job-status-retry",
+		TraceID:         "trace-status-retry",
+		State:           "running",
+		ProgressPercent: 50,
+		Message:         "processing",
+		UpdatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("upsertStatusWithRetry() error = %v", err)
+	}
+	if statusStore.calls != 3 {
+		t.Fatalf("statusStore.calls = %d, want 3", statusStore.calls)
+	}
+	if got := metrics.statusWriteRetriesTotal.Load(); got != 2 {
+		t.Fatalf("statusWriteRetriesTotal = %d, want 2", got)
+	}
+	if got := metrics.statusWriteFailuresTotal.Load(); got != 0 {
+		t.Fatalf("statusWriteFailuresTotal = %d, want 0", got)
+	}
+}
+
+// TestUpsertStatusWithRetryExhausted verifies terminal status-write failures are surfaced with failure metrics.
+func TestUpsertStatusWithRetryExhausted(t *testing.T) {
+	t.Parallel()
+
+	statusStore := &flakyStatusStore{failuresRemaining: 5}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			statusWriteMaxAttempts:    3,
+			statusWriteInitialBackoff: 0,
+			statusWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		statusStore: statusStore,
+		metrics:     metrics,
+	}
+
+	err := w.upsertStatusWithRetry(context.Background(), jobStatusRecord{
+		JobID:           "job-status-fail",
+		TraceID:         "trace-status-fail",
+		State:           "running",
+		ProgressPercent: 50,
+		Message:         "processing",
+		UpdatedAt:       time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatalf("upsertStatusWithRetry() error = nil, want non-nil")
+	}
+	if statusStore.calls != 3 {
+		t.Fatalf("statusStore.calls = %d, want 3", statusStore.calls)
+	}
+	if got := metrics.statusWriteRetriesTotal.Load(); got != 2 {
+		t.Fatalf("statusWriteRetriesTotal = %d, want 2", got)
+	}
+	if got := metrics.statusWriteFailuresTotal.Load(); got != 1 {
+		t.Fatalf("statusWriteFailuresTotal = %d, want 1", got)
+	}
+}
+
+// TestUpsertJobResultWithRetryRecovers verifies transient result-store failures are retried and recovered.
+func TestUpsertJobResultWithRetryRecovers(t *testing.T) {
+	t.Parallel()
+
+	resultStore := &flakyResultStore{failuresRemaining: 1}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			resultWriteMaxAttempts:    3,
+			resultWriteInitialBackoff: 0,
+			resultWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		resultStore: resultStore,
+		metrics:     metrics,
+	}
+
+	inserted, err := w.upsertJobResultWithRetry(context.Background(), kafkaJobMessage{
+		JobID:   "job-result-retry",
+		TraceID: "trace-result-retry",
+		JobType: "weather",
+	}, jobResultDocument{
+		JobID:      "job-result-retry",
+		TraceID:    "trace-result-retry",
+		JobType:    "weather",
+		FinalState: "completed",
+	})
+	if err != nil {
+		t.Fatalf("upsertJobResultWithRetry() error = %v", err)
+	}
+	if !inserted {
+		t.Fatalf("upsertJobResultWithRetry() inserted = false, want true")
+	}
+	if resultStore.calls != 2 {
+		t.Fatalf("resultStore.calls = %d, want 2", resultStore.calls)
+	}
+	if got := metrics.resultWriteRetriesTotal.Load(); got != 1 {
+		t.Fatalf("resultWriteRetriesTotal = %d, want 1", got)
+	}
+	if got := metrics.resultWriteFailuresTotal.Load(); got != 0 {
+		t.Fatalf("resultWriteFailuresTotal = %d, want 0", got)
+	}
+}
+
+// TestWaitForKafkaLoopDrainCompletion verifies shutdown-drain completion accounting.
+func TestWaitForKafkaLoopDrainCompletion(t *testing.T) {
+	t.Parallel()
+
+	metrics := &workerMetrics{}
+	w := &worker{
+		logger:  log.New(testWriter{t: t}, "", 0),
+		metrics: metrics,
+	}
+
+	kafkaDone := make(chan error, 1)
+	kafkaDone <- nil
+
+	if err := w.waitForKafkaLoopDrain(kafkaDone, time.Second); err != nil {
+		t.Fatalf("waitForKafkaLoopDrain() error = %v", err)
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 1", got)
+	}
+	if got := metrics.shutdownDrainTimeoutsTotal.Load(); got != 0 {
+		t.Fatalf("shutdownDrainTimeoutsTotal = %d, want 0", got)
+	}
+}
+
+// TestWaitForKafkaLoopDrainTimeout verifies shutdown-drain timeout accounting.
+func TestWaitForKafkaLoopDrainTimeout(t *testing.T) {
+	t.Parallel()
+
+	metrics := &workerMetrics{}
+	w := &worker{
+		logger:  log.New(testWriter{t: t}, "", 0),
+		metrics: metrics,
+	}
+
+	kafkaDone := make(chan error)
+	err := w.waitForKafkaLoopDrain(kafkaDone, 10*time.Millisecond)
+	if err == nil {
+		t.Fatalf("waitForKafkaLoopDrain() error = nil, want non-nil")
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 0 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 0", got)
+	}
+	if got := metrics.shutdownDrainTimeoutsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainTimeoutsTotal = %d, want 1", got)
+	}
+}
+
+// TestRunDrainsInFlightJobOnShutdown verifies Day 19 shutdown sequencing for in-flight jobs.
+func TestRunDrainsInFlightJobOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	consumer := &scriptedConsumer{
+		messages: []kafka.Message{
+			{
+				Topic: "jobs.weather.v1",
+				Key:   []byte("job-shutdown"),
+				Value: mustKafkaMessage(t, kafkaJobMessage{
+					SchemaVersion: "1.0",
+					JobID:         "job-shutdown",
+					JobType:       "weather",
+					SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+					TraceID:       "trace-shutdown",
+					Payload:       mustJSON(t, map[string]any{"city": "Austin", "units": "metric"}),
+				}),
+			},
+		},
+	}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			processTimeout:       time.Second,
+			commitTimeout:        time.Second,
+			grpcListenAddr:       "127.0.0.1:0",
+			metricsListenAddr:    "127.0.0.1:0",
+			shutdownDrainTimeout: time.Second,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		consumer:    consumer,
+		grpcServer:  grpc.NewServer(),
+		metrics:     metrics,
+		statusStore: noOpStatusStore{},
+		resultStore: noOpResultStore{},
+		handlers: map[string]jobHandler{
+			"weather": func(context.Context, kafkaJobMessage) (jobExecutionResult, error) {
+				select {
+				case started <- struct{}{}:
+				default:
+				}
+				time.Sleep(120 * time.Millisecond)
+				return jobExecutionResult{
+					Input:   map[string]any{"city": "Austin"},
+					Output:  map[string]any{"temperature": 21.2},
+					Message: "ok",
+				}, nil
+			},
+		},
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.run(runCtx)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("handler did not start in time")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("run() did not return after shutdown")
+	}
+
+	if consumer.commitCalls != 1 {
+		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+	if got := metrics.shutdownSignalsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownSignalsTotal = %d, want 1", got)
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 1", got)
 	}
 }
 

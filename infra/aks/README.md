@@ -1,8 +1,8 @@
-# Week 3 AKS Manifests
+# Week 3/4 AKS Manifests
 
 Baseline Kubernetes manifests for Week 3 AKS deployment.
 
-## Current Scope (Day 17)
+## Current Scope (Day 18)
 
 - Base namespace
 - Runtime config and secret wiring for API/worker workloads
@@ -15,6 +15,7 @@ Baseline Kubernetes manifests for Week 3 AKS deployment.
 - Release deployment helper for shared image tag rollout
 - Dry-run deploy-helper validation path for local readiness checks
 - Monitoring kustomization for Prometheus and Grafana (`infra/aks/monitoring`)
+- Worker reliability tuning via config map keys (`WORKER_STATUS_WRITE_*`, `WORKER_RESULT_WRITE_*`)
 
 ## Notes
 

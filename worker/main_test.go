@@ -54,6 +54,38 @@ func (s noOpResultStore) UpsertJobResult(context.Context, jobResultDocument) (bo
 	return true, nil
 }
 
+// flakyStatusStore fails for a fixed number of calls before succeeding.
+type flakyStatusStore struct {
+	failuresRemaining int
+	calls             int
+}
+
+// UpsertStatus returns transient failures until the configured failure budget is exhausted.
+func (s *flakyStatusStore) UpsertStatus(context.Context, jobStatusRecord) error {
+	s.calls++
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return errors.New("transient redis write failure")
+	}
+	return nil
+}
+
+// flakyResultStore fails for a fixed number of calls before succeeding.
+type flakyResultStore struct {
+	failuresRemaining int
+	calls             int
+}
+
+// UpsertJobResult returns transient failures until the configured failure budget is exhausted.
+func (s *flakyResultStore) UpsertJobResult(context.Context, jobResultDocument) (bool, error) {
+	s.calls++
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return false, errors.New("transient mongo write failure")
+	}
+	return true, nil
+}
+
 // weatherFetchResult scripts fake weather client responses for retry tests.
 type weatherFetchResult struct {
 	obs weatherObservation
@@ -198,6 +230,176 @@ func TestProcessFetchedMessageCommitsInvalidEnvelope(t *testing.T) {
 	}
 	if consumer.commitCalls != 1 {
 		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+}
+
+// TestProcessFetchedMessageCompletesAfterParentCancel verifies in-flight processing is isolated from parent shutdown cancellation.
+func TestProcessFetchedMessageCompletesAfterParentCancel(t *testing.T) {
+	t.Parallel()
+
+	consumer := &fakeConsumer{}
+	w := &worker{
+		cfg: config{
+			processTimeout: time.Second,
+			commitTimeout:  time.Second,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		consumer:    consumer,
+		statusStore: noOpStatusStore{},
+		resultStore: noOpResultStore{},
+		handlers: map[string]jobHandler{
+			"weather": func(context.Context, kafkaJobMessage) (jobExecutionResult, error) {
+				return jobExecutionResult{
+					Input:   map[string]any{"city": "Austin"},
+					Output:  map[string]any{"temperature": 21.2},
+					Message: "ok",
+				}, nil
+			},
+		},
+	}
+
+	msg := kafka.Message{
+		Topic: "jobs.weather.v1",
+		Key:   []byte("job-4"),
+		Value: mustKafkaMessage(t, kafkaJobMessage{
+			SchemaVersion: "1.0",
+			JobID:         "job-4",
+			JobType:       "weather",
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			TraceID:       "trace-4",
+			Payload:       mustJSON(t, map[string]any{"city": "Austin", "units": "metric"}),
+		}),
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.processFetchedMessage(canceledCtx, msg); err != nil {
+		t.Fatalf("processFetchedMessage(canceledCtx) error = %v", err)
+	}
+	if consumer.commitCalls != 1 {
+		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+}
+
+// TestUpsertStatusWithRetryRecovers verifies transient status-write failures are retried and recovered.
+func TestUpsertStatusWithRetryRecovers(t *testing.T) {
+	t.Parallel()
+
+	statusStore := &flakyStatusStore{failuresRemaining: 2}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			statusWriteMaxAttempts:    4,
+			statusWriteInitialBackoff: 0,
+			statusWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		statusStore: statusStore,
+		metrics:     metrics,
+	}
+
+	err := w.upsertStatusWithRetry(context.Background(), jobStatusRecord{
+		JobID:           "job-status-retry",
+		TraceID:         "trace-status-retry",
+		State:           "running",
+		ProgressPercent: 50,
+		Message:         "processing",
+		UpdatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("upsertStatusWithRetry() error = %v", err)
+	}
+	if statusStore.calls != 3 {
+		t.Fatalf("statusStore.calls = %d, want 3", statusStore.calls)
+	}
+	if got := metrics.statusWriteRetriesTotal.Load(); got != 2 {
+		t.Fatalf("statusWriteRetriesTotal = %d, want 2", got)
+	}
+	if got := metrics.statusWriteFailuresTotal.Load(); got != 0 {
+		t.Fatalf("statusWriteFailuresTotal = %d, want 0", got)
+	}
+}
+
+// TestUpsertStatusWithRetryExhausted verifies terminal status-write failures are surfaced with failure metrics.
+func TestUpsertStatusWithRetryExhausted(t *testing.T) {
+	t.Parallel()
+
+	statusStore := &flakyStatusStore{failuresRemaining: 5}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			statusWriteMaxAttempts:    3,
+			statusWriteInitialBackoff: 0,
+			statusWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		statusStore: statusStore,
+		metrics:     metrics,
+	}
+
+	err := w.upsertStatusWithRetry(context.Background(), jobStatusRecord{
+		JobID:           "job-status-fail",
+		TraceID:         "trace-status-fail",
+		State:           "running",
+		ProgressPercent: 50,
+		Message:         "processing",
+		UpdatedAt:       time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatalf("upsertStatusWithRetry() error = nil, want non-nil")
+	}
+	if statusStore.calls != 3 {
+		t.Fatalf("statusStore.calls = %d, want 3", statusStore.calls)
+	}
+	if got := metrics.statusWriteRetriesTotal.Load(); got != 2 {
+		t.Fatalf("statusWriteRetriesTotal = %d, want 2", got)
+	}
+	if got := metrics.statusWriteFailuresTotal.Load(); got != 1 {
+		t.Fatalf("statusWriteFailuresTotal = %d, want 1", got)
+	}
+}
+
+// TestUpsertJobResultWithRetryRecovers verifies transient result-store failures are retried and recovered.
+func TestUpsertJobResultWithRetryRecovers(t *testing.T) {
+	t.Parallel()
+
+	resultStore := &flakyResultStore{failuresRemaining: 1}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			resultWriteMaxAttempts:    3,
+			resultWriteInitialBackoff: 0,
+			resultWriteMaxBackoff:     0,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		resultStore: resultStore,
+		metrics:     metrics,
+	}
+
+	inserted, err := w.upsertJobResultWithRetry(context.Background(), kafkaJobMessage{
+		JobID:   "job-result-retry",
+		TraceID: "trace-result-retry",
+		JobType: "weather",
+	}, jobResultDocument{
+		JobID:      "job-result-retry",
+		TraceID:    "trace-result-retry",
+		JobType:    "weather",
+		FinalState: "completed",
+	})
+	if err != nil {
+		t.Fatalf("upsertJobResultWithRetry() error = %v", err)
+	}
+	if !inserted {
+		t.Fatalf("upsertJobResultWithRetry() inserted = false, want true")
+	}
+	if resultStore.calls != 2 {
+		t.Fatalf("resultStore.calls = %d, want 2", resultStore.calls)
+	}
+	if got := metrics.resultWriteRetriesTotal.Load(); got != 1 {
+		t.Fatalf("resultWriteRetriesTotal = %d, want 1", got)
+	}
+	if got := metrics.resultWriteFailuresTotal.Load(); got != 0 {
+		t.Fatalf("resultWriteFailuresTotal = %d, want 0", got)
 	}
 }
 

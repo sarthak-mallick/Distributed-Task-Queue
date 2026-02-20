@@ -1,6 +1,6 @@
 # Week 4 Execution Brief (Single Source of Truth)
 
-Last updated: 2026-02-19
+Last updated: 2026-02-20
 Canonical product/timeline reference: `docs/project-spec.md` (Week 4 section + acceptance criteria)
 
 This file is the active Week 4 execution and status artifact.
@@ -46,7 +46,7 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
 |----|--------|--------------|-------|
 | W4-001 | Completed | 2026-02-19 | Day 17 completed: API + worker expose Prometheus `/metrics`; runtime counters validated in canonical e2e. |
 | W4-002 | Completed | 2026-02-19 | Day 17 completed: AKS monitoring manifests for Prometheus/Grafana added and render checks integrated. |
-| W4-003 | Pending | 2026-02-19 | Planned for Day 18/19 hardening slice. |
+| W4-003 | In Progress | 2026-02-20 | Day 18 slice complete: retry/backoff hardening and shutdown observability implemented and validated; Day 19 sequencing checks pending. |
 | W4-004 | Pending | 2026-02-19 | Planned for Week 4 closure after hardening tasks. |
 
 ## Implementation Order
@@ -88,11 +88,25 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260219224508`)
 - 2026-02-19: Re-validated after canonical script day17 tag cleanup:
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260219224642`)
+- 2026-02-20: Started Day 18 `W4-003` hardening slice:
+  - Added worker retry/backoff controls for Redis status writes and Mongo result writes.
+  - Added Day 18 shutdown/reliability metrics (`dtq_worker_shutdown_signals_total`, `dtq_worker_status_write_*`, `dtq_worker_result_write_*`).
+  - Updated AKS worker config map with reliability env keys and updated canonical e2e Day 18 checks.
+- 2026-02-20: Day 18 validation (non-Docker checks) passed:
+  - `go test ./...` (api) passed
+  - `go test ./...` (worker) passed
+  - `kubectl kustomize infra/aks/base` passed
+  - `kubectl kustomize infra/aks/monitoring` passed
+  - `ACR_LOGIN_SERVER=example.azurecr.io IMAGE_TAG=day18-check DRY_RUN=true K8S_NAMESPACE=dtq bash infra/aks/scripts/deploy-release.sh` passed
+- 2026-02-20: Full canonical e2e currently blocked by local environment:
+  - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` stopped at preflight because Docker daemon was unreachable.
+- 2026-02-20: Docker access restored and full canonical validation passed:
+  - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220231122`).
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 17 complete)
+- Week status: In progress (Day 18 slice complete for W4-003)
 - Completed tasks: W4-001, W4-002
-- In-progress tasks: None
+- In-progress tasks: W4-003
 - Blockers: None
-- Next task: Start Day 18 hardening work for `W4-003` (worker reliability and graceful shutdown safety).
+- Next task: Continue Day 19 graceful-shutdown sequencing checks for `W4-003`.

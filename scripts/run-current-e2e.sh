@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # run-current-e2e executes deterministic end-to-end validation for the latest Day N flow.
-# It validates Week 2 runtime behavior and Week 3 Day 16 cloud scaffolding checks.
+# It validates Week 2 runtime behavior and Week 4 Day 17 monitoring scaffolding checks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -14,16 +14,17 @@ API_DIR="${ROOT_DIR}/api"
 WORKER_DIR="${ROOT_DIR}/worker"
 UI_DIR="${ROOT_DIR}/ui"
 AKS_BASE_DIR="${ROOT_DIR}/infra/aks/base"
+AKS_MONITORING_DIR="${ROOT_DIR}/infra/aks/monitoring"
 AKS_DEPLOY_SCRIPT="${ROOT_DIR}/infra/aks/scripts/deploy-release.sh"
 AZURE_ANSIBLE_DIR="${ROOT_DIR}/infra/azure/ansible"
 JENKINSFILE_PATH="${ROOT_DIR}/Jenkinsfile"
-WEEK3_HANDOFF_DOC="${ROOT_DIR}/docs/week-3-handoff.md"
+WEEK4_EXECUTION_DOC="${ROOT_DIR}/docs/week-4-execution.md"
 
 KEEP_INFRA=false
 SKIP_UNIT_TESTS=false
 PURGE_VOLUMES=false
 WITH_UI_CHECKS=false
-SKIP_WEEK3_CHECKS=false
+SKIP_WEEK4_CHECKS=false
 SKIP_IMAGE_BUILD_CHECKS=false
 
 # log prints all script status lines with a stable prefix.
@@ -41,12 +42,13 @@ Options:
   --skip-unit-tests    Skip `go test ./...` for api and worker.
   --skip-image-build-checks  Skip local Docker image build validation for api/worker/ui.
   --with-ui-checks     Run frontend validation (`npm install/ci` + `npm run build`).
-  --skip-week3-checks  Skip Week 3 Day 16 scaffold checks (Jenkinsfile/AKS/Ansible).
+  --skip-week4-checks  Skip Week 4 Day 17 scaffold checks (Jenkinsfile/AKS/Ansible/Monitoring).
+  --skip-week3-checks  Alias for --skip-week4-checks.
   --purge              Remove compose volumes on teardown (`docker compose down -v`).
   -h, --help           Show this help message.
 
 Behavior:
-  1) Validates Week 3 Day 16 scaffolding (Jenkins/AKS image-tag contract wiring, Dockerfiles, deploy-helper dry run, handoff doc, AKS manifests/env wiring, Ansible preflight when installed).
+  1) Validates Week 4 Day 17 scaffolding (Jenkins/AKS contract wiring, monitoring manifests, deploy-helper dry run, Week 4 execution doc, AKS manifests/env wiring, Ansible preflight when installed).
   2) Validates local container image builds for api/worker/ui (unless skipped).
   3) Starts compose infrastructure and smoke-checks it.
   4) Optionally runs frontend build checks (`--with-ui-checks`).
@@ -75,8 +77,12 @@ while [[ $# -gt 0 ]]; do
       WITH_UI_CHECKS=true
       shift
       ;;
+    --skip-week4-checks)
+      SKIP_WEEK4_CHECKS=true
+      shift
+      ;;
     --skip-week3-checks)
-      SKIP_WEEK3_CHECKS=true
+      SKIP_WEEK4_CHECKS=true
       shift
       ;;
     --purge)
@@ -109,6 +115,8 @@ API_PORT="${API_PORT:-18080}"
 API_ADDR=":${API_PORT}"
 API_BASE_URL="http://127.0.0.1:${API_PORT}"
 WORKER_GRPC_ADDR="${WORKER_GRPC_ADDR:-127.0.0.1:19090}"
+WORKER_METRICS_ADDR="${WORKER_METRICS_ADDR:-127.0.0.1:19112}"
+WORKER_METRICS_URL="http://${WORKER_METRICS_ADDR}"
 
 LOG_DIR="${ROOT_DIR}/.tmp/e2e/${RUN_ID}"
 mkdir -p "${LOG_DIR}"
@@ -117,6 +125,8 @@ WORKER_LOG="${LOG_DIR}/worker.log"
 SUBMIT_JSON="${LOG_DIR}/submit.json"
 STATUS_JSON="${LOG_DIR}/status.json"
 UNKNOWN_JSON="${LOG_DIR}/unknown-status.json"
+API_METRICS_SNAPSHOT="${LOG_DIR}/api-metrics.txt"
+WORKER_METRICS_SNAPSHOT="${LOG_DIR}/worker-metrics.txt"
 
 API_PID=""
 WORKER_PID=""
@@ -139,7 +149,7 @@ preflight_checks() {
   require_command go
   require_command curl
   require_command node
-  if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
+  if [[ "${SKIP_WEEK4_CHECKS}" == "false" ]]; then
     require_command kubectl
   fi
   if [[ "${WITH_UI_CHECKS}" == "true" ]]; then
@@ -152,14 +162,16 @@ preflight_checks() {
   fi
 }
 
-# run_week3_day16_checks validates local cloud scaffolding introduced for Week 3.
-run_week3_day16_checks() {
+# run_week4_day17_checks validates local cloud/monitoring scaffolding introduced for Week 4.
+run_week4_day17_checks() {
   local aks_render_file="${LOG_DIR}/aks-render.yaml"
+  local aks_monitoring_render_file="${LOG_DIR}/aks-monitoring-render.yaml"
   local ansible_vars_file="${LOG_DIR}/week3-preflight-vars.yml"
   local temp_ssh_pub="${LOG_DIR}/jenkins-temp.pub"
   local api_manifest="${AKS_BASE_DIR}/api-deployment.yaml"
   local worker_manifest="${AKS_BASE_DIR}/worker-deployment.yaml"
   local worker_service_manifest="${AKS_BASE_DIR}/worker-service.yaml"
+  local worker_metrics_service_manifest="${AKS_BASE_DIR}/worker-metrics-service.yaml"
   local api_config_manifest="${AKS_BASE_DIR}/api-configmap.yaml"
   local worker_config_manifest="${AKS_BASE_DIR}/worker-configmap.yaml"
   local runtime_secret_manifest="${AKS_BASE_DIR}/runtime-secrets.yaml"
@@ -168,7 +180,7 @@ run_week3_day16_checks() {
   local ui_dockerfile="${UI_DIR}/Dockerfile"
   local ui_nginx_conf="${UI_DIR}/nginx.conf"
   local deploy_script="${AKS_DEPLOY_SCRIPT}"
-  local week3_handoff_doc="${WEEK3_HANDOFF_DOC}"
+  local week4_execution_doc="${WEEK4_EXECUTION_DOC}"
   local required_stage
 
   if [[ ! -f "${JENKINSFILE_PATH}" ]]; then
@@ -183,7 +195,7 @@ run_week3_day16_checks() {
     fi
   done
   if grep -q "TODO:" "${JENKINSFILE_PATH}"; then
-    log "Jenkinsfile still contains TODO placeholders; Day 16 pipeline wiring is incomplete"
+    log "Jenkinsfile still contains TODO placeholders; Day 17 pipeline wiring is incomplete"
     exit 1
   fi
   for required_cmd in \
@@ -195,15 +207,15 @@ run_week3_day16_checks() {
     "az aks get-credentials" \
     'bash infra/aks/scripts/deploy-release.sh'; do
     if ! grep -F -q "${required_cmd}" "${JENKINSFILE_PATH}"; then
-      log "Jenkinsfile missing required Day 16 command marker: ${required_cmd}"
+      log "Jenkinsfile missing required Day 17 command marker: ${required_cmd}"
       exit 1
     fi
   done
-  log "jenkinsfile stage and day16 command wiring check passed"
+  log "jenkinsfile stage and day17 command wiring check passed"
 
   for required_file in "${api_dockerfile}" "${worker_dockerfile}" "${ui_dockerfile}" "${ui_nginx_conf}"; do
     if [[ ! -f "${required_file}" ]]; then
-      log "required Day 16 containerization file missing: ${required_file}"
+      log "required Day 17 containerization file missing: ${required_file}"
       exit 1
     fi
   done
@@ -226,29 +238,29 @@ run_week3_day16_checks() {
     'if [[ "${DRY_RUN}" == "true" ]]; then' \
     'kubectl kustomize "${AKS_BASE_DIR}" >/dev/null'; do
     if ! grep -F -q "${required_marker}" "${deploy_script}"; then
-      log "AKS deploy helper missing required Day 16 marker: ${required_marker}"
+      log "AKS deploy helper missing required Day 17 marker: ${required_marker}"
       exit 1
     fi
   done
   log "aks deploy helper contract check passed"
 
-  if ! ACR_LOGIN_SERVER="example.azurecr.io" IMAGE_TAG="day16-check" K8S_NAMESPACE="dtq" DRY_RUN="true" bash "${deploy_script}" >/dev/null; then
+  if ! ACR_LOGIN_SERVER="example.azurecr.io" IMAGE_TAG="day17-check" K8S_NAMESPACE="dtq" DRY_RUN="true" bash "${deploy_script}" >/dev/null; then
     log "AKS deploy helper dry-run validation failed"
     exit 1
   fi
   log "aks deploy helper dry-run check passed"
 
-  if [[ ! -f "${week3_handoff_doc}" ]]; then
-    log "Week 3 handoff doc missing at ${week3_handoff_doc}"
+  if [[ ! -f "${week4_execution_doc}" ]]; then
+    log "Week 4 execution doc missing at ${week4_execution_doc}"
     exit 1
   fi
-  for required_handoff_line in "^Scope:" "^Changes:" "^Acceptance criteria status:" "^Risks/issues:" "^Next step:"; do
-    if ! grep -Eq "${required_handoff_line}" "${week3_handoff_doc}"; then
-      log "Week 3 handoff doc missing required line matching ${required_handoff_line}"
+  for required_execution_line in "^# Week 4 Execution Brief" "^## Live Task Status" "^## Session Log \\(Append-Only\\)" "^## Handoff Snapshot"; do
+    if ! grep -Eq "${required_execution_line}" "${week4_execution_doc}"; then
+      log "Week 4 execution doc missing required section matching ${required_execution_line}"
       exit 1
     fi
   done
-  log "week 3 handoff doc check passed"
+  log "week 4 execution doc check passed"
 
   if [[ ! -f "${AKS_BASE_DIR}/kustomization.yaml" ]]; then
     log "missing AKS kustomization at ${AKS_BASE_DIR}/kustomization.yaml"
@@ -268,6 +280,7 @@ run_week3_day16_checks() {
     "${api_manifest}" \
     "${worker_manifest}" \
     "${worker_service_manifest}" \
+    "${worker_metrics_service_manifest}" \
     "${api_config_manifest}" \
     "${worker_config_manifest}" \
     "${runtime_secret_manifest}"; do
@@ -280,7 +293,8 @@ run_week3_day16_checks() {
     "name: dtq-api-config" \
     "name: dtq-worker-config" \
     "name: dtq-runtime-secrets" \
-    "name: dtq-worker-grpc"; do
+    "name: dtq-worker-grpc" \
+    "name: dtq-worker-metrics"; do
     if ! grep -q "${required_name}" "${aks_render_file}"; then
       log "AKS render output missing required resource marker: ${required_name}"
       exit 1
@@ -290,7 +304,7 @@ run_week3_day16_checks() {
     log "api deployment manifest is missing required env wiring references"
     exit 1
   fi
-  if ! grep -q 'name: dtq-worker-config' "${worker_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${worker_manifest}" || ! grep -q 'name: WORKER_GRPC_ADDR' "${worker_manifest}"; then
+  if ! grep -q 'name: dtq-worker-config' "${worker_manifest}" || ! grep -q 'name: dtq-runtime-secrets' "${worker_manifest}" || ! grep -q 'name: WORKER_GRPC_ADDR' "${worker_manifest}" || ! grep -q 'name: WORKER_METRICS_ADDR' "${worker_manifest}"; then
     log "worker deployment manifest is missing required env wiring references"
     exit 1
   fi
@@ -300,8 +314,30 @@ run_week3_day16_checks() {
   fi
   log "aks kustomize render and manifest wiring checks passed"
 
+  if [[ ! -f "${AKS_MONITORING_DIR}/kustomization.yaml" ]]; then
+    log "missing AKS monitoring kustomization at ${AKS_MONITORING_DIR}/kustomization.yaml"
+    exit 1
+  fi
+
+  kubectl kustomize "${AKS_MONITORING_DIR}" >"${aks_monitoring_render_file}"
+  if [[ ! -s "${aks_monitoring_render_file}" ]]; then
+    log "AKS monitoring render output is empty"
+    exit 1
+  fi
+  for required_monitoring_name in \
+    "name: dtq-monitoring" \
+    "name: dtq-prometheus-config" \
+    "name: dtq-prometheus" \
+    "name: dtq-grafana"; do
+    if ! grep -q "${required_monitoring_name}" "${aks_monitoring_render_file}"; then
+      log "AKS monitoring render missing required resource marker: ${required_monitoring_name}"
+      exit 1
+    fi
+  done
+  log "aks monitoring kustomize render checks passed"
+
   if command -v ansible-playbook >/dev/null 2>&1; then
-    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY16ValidationKey local-test" >"${temp_ssh_pub}"
+    printf '%s\n' "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCyT2DAY17ValidationKey local-test" >"${temp_ssh_pub}"
 
     cat >"${ansible_vars_file}" <<EOF
 azure_subscription_id: "00000000-0000-0000-0000-000000000000"
@@ -328,7 +364,7 @@ EOF
 
 # run_image_build_checks validates local Dockerfiles by building all service images.
 run_image_build_checks() {
-  local image_tag="day16-local-${RUN_ID}"
+  local image_tag="day17-local-${RUN_ID}"
   local component
   local image_ref
 
@@ -460,6 +496,26 @@ wait_for_graphql_path() {
   return 1
 }
 
+# wait_for_metrics_endpoint waits until one metrics endpoint contains a required metric marker.
+wait_for_metrics_endpoint() {
+  local endpoint_url="$1"
+  local required_marker="$2"
+  local endpoint_name="$3"
+  local out_file="$4"
+  local attempts=45
+
+  for ((i=1; i<=attempts; i++)); do
+    if curl -s "${endpoint_url}" >"${out_file}" && grep -q "${required_marker}" "${out_file}"; then
+      log "${endpoint_name} metrics endpoint is ready"
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "${endpoint_name} metrics endpoint did not become ready in time"
+  return 1
+}
+
 # run_graphql_subscription_check validates GraphQL websocket subscription delivery through terminal state.
 run_graphql_subscription_check() {
   local job_id="$1"
@@ -570,11 +626,11 @@ fi
 
 preflight_checks
 
-if [[ "${SKIP_WEEK3_CHECKS}" == "false" ]]; then
-  log "running week 3 day 16 scaffold checks"
-  run_week3_day16_checks
+if [[ "${SKIP_WEEK4_CHECKS}" == "false" ]]; then
+  log "running week 4 day 17 scaffold checks"
+  run_week4_day17_checks
 else
-  log "skipping week 3 checks (--skip-week3-checks)"
+  log "skipping week 4 checks (--skip-week4-checks/--skip-week3-checks)"
 fi
 
 if [[ "${SKIP_IMAGE_BUILD_CHECKS}" == "false" ]]; then
@@ -643,6 +699,7 @@ log "starting worker process"
   RABBITMQ_PROGRESS_REQUEST_QUEUE="${PROGRESS_QUEUE}" \
   RABBITMQ_PROGRESS_CONSUMER_TAG="${PROGRESS_CONSUMER_TAG}" \
   WORKER_GRPC_ADDR="${WORKER_GRPC_ADDR}" \
+  WORKER_METRICS_ADDR="${WORKER_METRICS_ADDR}" \
   WEATHER_PROVIDER="mock" \
   go run . >"${WORKER_LOG}" 2>&1
 ) &
@@ -650,6 +707,8 @@ WORKER_PID="$!"
 
 wait_for_api_health
 wait_for_graphql_path
+wait_for_metrics_endpoint "${API_BASE_URL}/metrics" "dtq_api_graphql_http_requests_total" "api" "${API_METRICS_SNAPSHOT}"
+wait_for_metrics_endpoint "${WORKER_METRICS_URL}/metrics" "dtq_worker_job_attempts_total" "worker" "${WORKER_METRICS_SNAPSHOT}"
 
 log "submitting test job via graphql mutation"
 submit_payload='{"query":"mutation SubmitJob($input: SubmitJobInput!){submitJob(input:$input){jobId traceId jobType state submittedAt message}}","variables":{"input":{"jobType":"weather","payload":{"city":"Austin","country_code":"US","units":"metric"}}}}'
@@ -699,6 +758,30 @@ unknown_code="$(graphql_status_query "00000000-0000-0000-0000-000000000000" "${U
 if [[ "${unknown_code}" != "200" ]] || ! grep -q '"state":"not_found"' "${UNKNOWN_JSON}"; then
   log "expected unknown job graphql query to return state=not_found, got http=${unknown_code}"
   cat "${UNKNOWN_JSON}"
+  exit 1
+fi
+
+if ! curl -s "${API_BASE_URL}/metrics" >"${API_METRICS_SNAPSHOT}"; then
+  log "api metrics validation failed: could not fetch /metrics"
+  exit 1
+fi
+if ! curl -s "${WORKER_METRICS_URL}/metrics" >"${WORKER_METRICS_SNAPSHOT}"; then
+  log "worker metrics validation failed: could not fetch /metrics"
+  exit 1
+fi
+
+api_submit_total="$(awk '$1=="dtq_api_job_submissions_total"{print $2}' "${API_METRICS_SNAPSHOT}" | tail -n1)"
+worker_completed_total="$(awk '$1=="dtq_worker_job_completed_total"{print $2}' "${WORKER_METRICS_SNAPSHOT}" | tail -n1)"
+if [[ -z "${api_submit_total}" || -z "${worker_completed_total}" ]]; then
+  log "metrics validation failed: required metric lines were not found"
+  exit 1
+fi
+if ! [[ "${api_submit_total}" =~ ^[0-9]+$ ]] || ! [[ "${worker_completed_total}" =~ ^[0-9]+$ ]]; then
+  log "metrics validation failed: metric values are not integers api_submit_total=${api_submit_total} worker_completed_total=${worker_completed_total}"
+  exit 1
+fi
+if (( api_submit_total < 1 || worker_completed_total < 1 )); then
+  log "metrics validation failed: expected submission/completion counters >=1 api_submit_total=${api_submit_total} worker_completed_total=${worker_completed_total}"
   exit 1
 fi
 

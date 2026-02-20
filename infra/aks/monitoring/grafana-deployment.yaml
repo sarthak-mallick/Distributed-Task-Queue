@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dtq-grafana
+  labels:
+    app: dtq-grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dtq-grafana
+  template:
+    metadata:
+      labels:
+        app: dtq-grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.1.4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+          ports:
+            - containerPort: 3000

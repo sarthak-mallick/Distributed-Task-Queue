@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dtq-prometheus
+  labels:
+    app: dtq-prometheus
+spec:
+  selector:
+    app: dtq-prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP

@@ -56,6 +56,13 @@ func (a *app) handleLegacyRESTDisabled(w http.ResponseWriter, r *http.Request) {
 
 // handleGraphQL serves GraphQL mutation/query operations over HTTP POST.
 func (a *app) handleGraphQL(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	operation := "unknown"
+	success := false
+	defer func() {
+		apiMetricsState.recordGraphQLHTTPRequest(operation, time.Since(startedAt), success)
+	}()
+
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
 		return
@@ -66,12 +73,14 @@ func (a *app) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, graphQLErrorResponse(err.Error()))
 		return
 	}
+	operation = resolveGraphQLOperation(req)
 
 	result, err := a.executeGraphQLOperation(r.Context(), req)
 	if err != nil {
 		writeJSON(w, http.StatusOK, graphQLErrorResponse(err.Error()))
 		return
 	}
+	success = true
 	writeJSON(w, http.StatusOK, graphQLResponse{Data: result})
 }
 
@@ -94,6 +103,7 @@ func (a *app) executeGraphQLOperation(ctx context.Context, req graphQLRequest) (
 		if err != nil {
 			return nil, err
 		}
+		apiMetricsState.recordJobSubmission()
 
 		return map[string]any{
 			"submitJob": map[string]any{
@@ -259,6 +269,7 @@ func (a *app) handleGraphQLWebSocket(w http.ResponseWriter, r *http.Request) {
 		a.logger.Printf("graphql ws upgrade failed: %v", err)
 		return
 	}
+	apiMetricsState.recordGraphQLSubscriptionConnection()
 
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	session := &graphQLSubscriptionSession{

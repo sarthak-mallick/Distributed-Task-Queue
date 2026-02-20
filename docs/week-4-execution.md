@@ -46,7 +46,7 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
 |----|--------|--------------|-------|
 | W4-001 | Completed | 2026-02-19 | Day 17 completed: API + worker expose Prometheus `/metrics`; runtime counters validated in canonical e2e. |
 | W4-002 | Completed | 2026-02-19 | Day 17 completed: AKS monitoring manifests for Prometheus/Grafana added and render checks integrated. |
-| W4-003 | In Progress | 2026-02-20 | Day 18 slice complete: retry/backoff hardening and shutdown observability implemented and validated; Day 19 sequencing checks pending. |
+| W4-003 | Completed | 2026-02-20 | Day 18-19 completed: retry/backoff hardening plus shutdown-drain sequencing implemented and validated. |
 | W4-004 | Pending | 2026-02-19 | Planned for Week 4 closure after hardening tasks. |
 
 ## Implementation Order
@@ -102,11 +102,21 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` stopped at preflight because Docker daemon was unreachable.
 - 2026-02-20: Docker access restored and full canonical validation passed:
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220231122`).
+- 2026-02-20: Completed Day 19 `W4-003` graceful-shutdown sequencing slice:
+  - Added shutdown-drain timeout control (`WORKER_SHUTDOWN_DRAIN_TIMEOUT`) and explicit fetch-stop -> drain -> service-shutdown sequencing.
+  - Added Day 19 shutdown-drain metrics (`dtq_worker_shutdown_drain_completions_total`, `dtq_worker_shutdown_drain_timeouts_total`).
+  - Added worker unit coverage for shutdown drain completion/timeout and in-flight job drain on shutdown.
+- 2026-02-20: Day 19 validation evidence:
+  - `go test ./...` (api) passed
+  - `go test ./...` (worker) passed
+  - `kubectl kustomize infra/aks/base` passed
+  - `ACR_LOGIN_SERVER=example.azurecr.io IMAGE_TAG=day19-check DRY_RUN=true K8S_NAMESPACE=dtq bash infra/aks/scripts/deploy-release.sh` passed
+  - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220232132`)
 
 ## Handoff Snapshot
 
-- Week status: In progress (Day 18 slice complete for W4-003)
-- Completed tasks: W4-001, W4-002
-- In-progress tasks: W4-003
+- Week status: In progress (Day 19 complete)
+- Completed tasks: W4-001, W4-002, W4-003
+- In-progress tasks: None
 - Blockers: None
-- Next task: Continue Day 19 graceful-shutdown sequencing checks for `W4-003`.
+- Next task: Start Day 20 `W4-004` final polish and acceptance closure.

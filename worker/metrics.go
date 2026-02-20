@@ -21,6 +21,8 @@ type workerMetrics struct {
 	rabbitProgressRequestsTotal   atomic.Uint64
 	gracefulShutdownRequestsTotal atomic.Uint64
 	shutdownSignalsTotal          atomic.Uint64
+	shutdownDrainCompletionsTotal atomic.Uint64
+	shutdownDrainTimeoutsTotal    atomic.Uint64
 	statusWriteRetriesTotal       atomic.Uint64
 	statusWriteFailuresTotal      atomic.Uint64
 	resultWriteRetriesTotal       atomic.Uint64
@@ -82,6 +84,16 @@ func (m *workerMetrics) recordShutdownSignal() {
 	m.shutdownSignalsTotal.Add(1)
 }
 
+// recordShutdownDrainCompletion increments worker shutdown-drain completion counters.
+func (m *workerMetrics) recordShutdownDrainCompletion() {
+	m.shutdownDrainCompletionsTotal.Add(1)
+}
+
+// recordShutdownDrainTimeout increments worker shutdown-drain timeout counters.
+func (m *workerMetrics) recordShutdownDrainTimeout() {
+	m.shutdownDrainTimeoutsTotal.Add(1)
+}
+
 // recordStatusWriteRetry increments retry counters for Redis status writes.
 func (m *workerMetrics) recordStatusWriteRetry() {
 	m.statusWriteRetriesTotal.Add(1)
@@ -126,6 +138,8 @@ func (m *workerMetrics) renderPrometheus() string {
 	writeWorkerCounterMetric(&b, "dtq_worker_rabbit_progress_requests_total", "Total worker RabbitMQ progress requests handled.", m.rabbitProgressRequestsTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_graceful_shutdown_requests_total", "Total worker graceful shutdown requests received.", m.gracefulShutdownRequestsTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_signals_total", "Total worker shutdown signals observed by main runtime loop.", m.shutdownSignalsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_drain_completions_total", "Total worker shutdown drain completions before service stop.", m.shutdownDrainCompletionsTotal.Load())
+	writeWorkerCounterMetric(&b, "dtq_worker_shutdown_drain_timeouts_total", "Total worker shutdown drain timeouts before service stop.", m.shutdownDrainTimeoutsTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_status_write_retries_total", "Total retry attempts for worker Redis status writes.", m.statusWriteRetriesTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_status_write_failures_total", "Total terminal failures for worker Redis status writes.", m.statusWriteFailuresTotal.Load())
 	writeWorkerCounterMetric(&b, "dtq_worker_result_write_retries_total", "Total retry attempts for worker Mongo result writes.", m.resultWriteRetriesTotal.Load())

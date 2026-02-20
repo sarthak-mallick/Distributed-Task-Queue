@@ -6,11 +6,13 @@ import (
 	"errors"
 	"log"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"distributed-task-queue/worker/internal/apiworkergrpc"
 	"github.com/segmentio/kafka-go"
+	"google.golang.org/grpc"
 )
 
 // fakeConsumer is a test double for commit assertions.
@@ -36,6 +38,49 @@ func (f *fakeConsumer) CommitMessages(_ context.Context, _ ...kafka.Message) err
 // Close satisfies the kafkaConsumer interface.
 func (f *fakeConsumer) Close() error {
 	return nil
+}
+
+// scriptedConsumer returns scripted fetch messages and then blocks until cancellation.
+type scriptedConsumer struct {
+	messages    []kafka.Message
+	nextIndex   int
+	commitCalls int
+	mu          sync.Mutex
+}
+
+// FetchMessage returns scripted messages in sequence, then waits for cancellation.
+func (c *scriptedConsumer) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	c.mu.Lock()
+	if c.nextIndex < len(c.messages) {
+		msg := c.messages[c.nextIndex]
+		c.nextIndex++
+		c.mu.Unlock()
+		return msg, nil
+	}
+	c.mu.Unlock()
+
+	<-ctx.Done()
+	return kafka.Message{}, ctx.Err()
+}
+
+// CommitMessages records commit calls for sequencing assertions.
+func (c *scriptedConsumer) CommitMessages(_ context.Context, _ ...kafka.Message) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commitCalls++
+	return nil
+}
+
+// Close satisfies the kafkaConsumer interface.
+func (c *scriptedConsumer) Close() error {
+	return nil
+}
+
+// commitCount returns the number of commit calls recorded by the scripted consumer.
+func (c *scriptedConsumer) commitCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.commitCalls
 }
 
 // noOpStatusStore is a status store stub for process tests.
@@ -400,6 +445,140 @@ func TestUpsertJobResultWithRetryRecovers(t *testing.T) {
 	}
 	if got := metrics.resultWriteFailuresTotal.Load(); got != 0 {
 		t.Fatalf("resultWriteFailuresTotal = %d, want 0", got)
+	}
+}
+
+// TestWaitForKafkaLoopDrainCompletion verifies shutdown-drain completion accounting.
+func TestWaitForKafkaLoopDrainCompletion(t *testing.T) {
+	t.Parallel()
+
+	metrics := &workerMetrics{}
+	w := &worker{
+		logger:  log.New(testWriter{t: t}, "", 0),
+		metrics: metrics,
+	}
+
+	kafkaDone := make(chan error, 1)
+	kafkaDone <- nil
+
+	if err := w.waitForKafkaLoopDrain(kafkaDone, time.Second); err != nil {
+		t.Fatalf("waitForKafkaLoopDrain() error = %v", err)
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 1", got)
+	}
+	if got := metrics.shutdownDrainTimeoutsTotal.Load(); got != 0 {
+		t.Fatalf("shutdownDrainTimeoutsTotal = %d, want 0", got)
+	}
+}
+
+// TestWaitForKafkaLoopDrainTimeout verifies shutdown-drain timeout accounting.
+func TestWaitForKafkaLoopDrainTimeout(t *testing.T) {
+	t.Parallel()
+
+	metrics := &workerMetrics{}
+	w := &worker{
+		logger:  log.New(testWriter{t: t}, "", 0),
+		metrics: metrics,
+	}
+
+	kafkaDone := make(chan error)
+	err := w.waitForKafkaLoopDrain(kafkaDone, 10*time.Millisecond)
+	if err == nil {
+		t.Fatalf("waitForKafkaLoopDrain() error = nil, want non-nil")
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 0 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 0", got)
+	}
+	if got := metrics.shutdownDrainTimeoutsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainTimeoutsTotal = %d, want 1", got)
+	}
+}
+
+// TestRunDrainsInFlightJobOnShutdown verifies Day 19 shutdown sequencing for in-flight jobs.
+func TestRunDrainsInFlightJobOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	consumer := &scriptedConsumer{
+		messages: []kafka.Message{
+			{
+				Topic: "jobs.weather.v1",
+				Key:   []byte("job-shutdown"),
+				Value: mustKafkaMessage(t, kafkaJobMessage{
+					SchemaVersion: "1.0",
+					JobID:         "job-shutdown",
+					JobType:       "weather",
+					SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+					TraceID:       "trace-shutdown",
+					Payload:       mustJSON(t, map[string]any{"city": "Austin", "units": "metric"}),
+				}),
+			},
+		},
+	}
+	metrics := &workerMetrics{}
+	w := &worker{
+		cfg: config{
+			processTimeout:       time.Second,
+			commitTimeout:        time.Second,
+			grpcListenAddr:       "127.0.0.1:0",
+			metricsListenAddr:    "127.0.0.1:0",
+			shutdownDrainTimeout: time.Second,
+		},
+		logger:      log.New(testWriter{t: t}, "", 0),
+		consumer:    consumer,
+		grpcServer:  grpc.NewServer(),
+		metrics:     metrics,
+		statusStore: noOpStatusStore{},
+		resultStore: noOpResultStore{},
+		handlers: map[string]jobHandler{
+			"weather": func(context.Context, kafkaJobMessage) (jobExecutionResult, error) {
+				select {
+				case started <- struct{}{}:
+				default:
+				}
+				time.Sleep(120 * time.Millisecond)
+				return jobExecutionResult{
+					Input:   map[string]any{"city": "Austin"},
+					Output:  map[string]any{"temperature": 21.2},
+					Message: "ok",
+				}, nil
+			},
+		},
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.run(runCtx)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("handler did not start in time")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("run() did not return after shutdown")
+	}
+
+	if consumer.commitCalls != 1 {
+		t.Fatalf("commitCalls = %d, want 1", consumer.commitCalls)
+	}
+	if got := metrics.shutdownSignalsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownSignalsTotal = %d, want 1", got)
+	}
+	if got := metrics.shutdownDrainCompletionsTotal.Load(); got != 1 {
+		t.Fatalf("shutdownDrainCompletionsTotal = %d, want 1", got)
 	}
 }
 

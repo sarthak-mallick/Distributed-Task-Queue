@@ -39,6 +39,7 @@ go run .
 - `WORKER_RESULT_WRITE_MAX_ATTEMPTS` (default: `3`)
 - `WORKER_RESULT_WRITE_INITIAL_BACKOFF` (default: `200ms`)
 - `WORKER_RESULT_WRITE_MAX_BACKOFF` (default: `2s`)
+- `WORKER_SHUTDOWN_DRAIN_TIMEOUT` (default: `20s`)
 - `REDIS_ADDR` (default: `localhost:6379`)
 - `REDIS_USERNAME` (optional)
 - `REDIS_PASSWORD` (optional)

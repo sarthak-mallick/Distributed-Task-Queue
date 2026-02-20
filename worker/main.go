@@ -83,6 +83,7 @@ type config struct {
 	resultWriteMaxAttempts    int
 	resultWriteInitialBackoff time.Duration
 	resultWriteMaxBackoff     time.Duration
+	shutdownDrainTimeout      time.Duration
 }
 
 // kafkaConsumer abstracts kafka.Reader for testability of commit behavior.
@@ -391,6 +392,14 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	shutdownDrainTimeout, err := parseDurationEnv("WORKER_SHUTDOWN_DRAIN_TIMEOUT", 20*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+	if shutdownDrainTimeout <= 0 {
+		return config{}, errors.New("WORKER_SHUTDOWN_DRAIN_TIMEOUT must be > 0")
+	}
+
 	jobTypes, err := normalizeJobTypes(parseCSVEnv("WORKER_JOB_TYPES", []string{"weather"}))
 	if err != nil {
 		return config{}, err
@@ -444,11 +453,12 @@ func loadConfig() (config, error) {
 		resultWriteMaxAttempts:    resultWriteMaxAttempts,
 		resultWriteInitialBackoff: resultWriteInitialBackoff,
 		resultWriteMaxBackoff:     resultWriteMaxBackoff,
+		shutdownDrainTimeout:      shutdownDrainTimeout,
 	}
 
 	cfg.kafkaTopics = resolveKafkaTopics(cfg.jobTypes, cfg.kafkaTopic, cfg.kafkaTopicTpl)
 	appLogger.Printf(
-		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_metrics_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d status_write_max_attempts=%d result_write_max_attempts=%d",
+		"config loaded kafka_brokers=%v kafka_group_id=%s job_types=%v kafka_topics=%v redis_addr=%s redis_db=%d mongo_uri=%s mongo_db=%s mongo_collection=%s rabbit_progress_queue=%s worker_grpc_addr=%s worker_metrics_addr=%s worker_grpc_poll_interval=%s weather_provider=%s weather_max_attempts=%d status_write_max_attempts=%d result_write_max_attempts=%d shutdown_drain_timeout=%s",
 		cfg.kafkaBrokers,
 		cfg.kafkaGroupID,
 		cfg.jobTypes,
@@ -466,6 +476,7 @@ func loadConfig() (config, error) {
 		cfg.weatherMaxAttempts,
 		cfg.statusWriteMaxAttempts,
 		cfg.resultWriteMaxAttempts,
+		cfg.shutdownDrainTimeout,
 	)
 	return cfg, nil
 }
@@ -657,31 +668,76 @@ func (w *worker) run(ctx context.Context) error {
 		w.cfg.metricsListenAddr,
 	)
 
+	serviceCtx, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+
+	fetchCtx, cancelFetch := context.WithCancel(context.Background())
+	defer cancelFetch()
+
+	if err := w.startMetricsServer(serviceCtx); err != nil {
+		return err
+	}
+
+	if err := w.startGRPCServer(serviceCtx); err != nil {
+		return err
+	}
+
+	if w.rabbitConn != nil {
+		go func() {
+			if err := w.runProgressResponder(serviceCtx); err != nil && serviceCtx.Err() == nil {
+				w.logger.Printf("progress responder stopped with error: %v", err)
+			}
+		}()
+	} else {
+		w.logger.Println("progress responder disabled: rabbitmq connection is not configured")
+	}
+
+	kafkaDone := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
+		kafkaDone <- w.runKafkaLoop(fetchCtx)
+	}()
+
+	select {
+	case err := <-kafkaDone:
+		cancelServices()
+		return err
+	case <-ctx.Done():
 		inFlight := int64(0)
 		if w.metrics != nil {
 			w.metrics.recordShutdownSignal()
 			inFlight = w.metrics.jobsInFlight()
 		}
 		w.logger.Printf("worker shutdown signal received in_flight_jobs=%d", inFlight)
-	}()
-
-	if err := w.startMetricsServer(ctx); err != nil {
+		cancelFetch()
+		err := w.waitForKafkaLoopDrain(kafkaDone, w.cfg.shutdownDrainTimeout)
+		cancelServices()
 		return err
 	}
+}
 
-	if err := w.startGRPCServer(ctx); err != nil {
-		return err
-	}
+// waitForKafkaLoopDrain waits for kafka loop completion or times out while preserving shutdown observability.
+func (w *worker) waitForKafkaLoopDrain(kafkaDone <-chan error, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	go func() {
-		if err := w.runProgressResponder(ctx); err != nil && ctx.Err() == nil {
-			w.logger.Printf("progress responder stopped with error: %v", err)
+	select {
+	case err := <-kafkaDone:
+		if err != nil {
+			return err
 		}
-	}()
-
-	return w.runKafkaLoop(ctx)
+		if w.metrics != nil {
+			w.metrics.recordShutdownDrainCompletion()
+		}
+		w.logger.Printf("worker shutdown drain completed timeout=%s", timeout)
+		return nil
+	case <-timer.C:
+		inFlight := int64(0)
+		if w.metrics != nil {
+			w.metrics.recordShutdownDrainTimeout()
+			inFlight = w.metrics.jobsInFlight()
+		}
+		return fmt.Errorf("worker shutdown drain timed out timeout=%s in_flight_jobs=%d", timeout, inFlight)
+	}
 }
 
 // startGRPCServer starts worker's gRPC status service and shuts it down on context cancel.

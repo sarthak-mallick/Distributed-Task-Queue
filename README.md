@@ -71,7 +71,52 @@ flowchart TB
     AKS -->|"Runs services"| WKR
 ```
 
-A distributed task queue where users submit jobs via a web UI, workers process them, and users can monitor live progress.
+### Architecture Summary
+
+- The React UI is the user entry point for job submission and live progress monitoring.
+- The Go API exposes the GraphQL surface and orchestrates job lifecycle operations.
+- Kafka is the primary asynchronous queue used to decouple job submission from processing.
+- Go workers consume Kafka jobs, execute external API calls, and drive progress milestones.
+- Redis stores hot job state (`queued`, `running`, `completed/failed`) for fast status reads.
+- MongoDB stores durable final outputs and metadata for each job execution.
+- RabbitMQ handles request-reply style progress lookups where correlation and acknowledgments matter.
+- Prometheus and Grafana provide metrics, dashboards, and alerting for service and queue health.
+- Azure delivery uses Ansible + Jenkins + ACR + AKS for provisioning, CI/CD, and runtime hosting.
+
+## Workflow Diagram
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React UI
+    participant API as Go API
+    participant K as Kafka
+    participant W as Go Worker
+    participant R as Redis
+    participant M as MongoDB
+    participant Q as RabbitMQ
+
+    User->>UI: Submit job
+    UI->>API: GraphQL mutation (submitJob)
+    API->>K: Publish job event
+    API->>R: Set status = queued (0%)
+    API-->>UI: Return job_id
+
+    K->>W: Deliver job
+    W->>R: Update status = running (20/50/80%)
+    W->>W: Call external API (weather/quote/fx/github)
+    W->>M: Persist final result
+    W->>R: Update status = completed (100%)
+
+    UI->>API: GraphQL subscription (job updates)
+    API-->>UI: Push status/progress events
+
+    User->>UI: Request current progress
+    UI->>API: Query progress by job_id
+    API->>Q: Progress request (correlation_id)
+    Q-->>API: Progress reply
+    API-->>UI: Current status/progress
+```
 
 ## Current Runbook (Completed Through Week 4 Day 20)
 Runbooks are split by use case to avoid duplicated instructions:

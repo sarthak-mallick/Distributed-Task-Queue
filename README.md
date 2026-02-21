@@ -3,7 +3,7 @@
 ## Architecture Diagram
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Client["Client"]
         UI["React UI"]
     end
@@ -44,18 +44,20 @@ flowchart LR
     end
 
     UI -->|"GraphQL queries/mutations/subscriptions"| API
+    API -->|"Internal calls"| WSVC
     API -->|"Publish jobs"| KAFKA
     KAFKA -->|"Consume jobs"| WKR
-    API -->|"Internal calls"| WSVC
     WSVC <--> WKR
+
+    WKR -->|"Call provider"| WEATHER
+    WKR -->|"Call provider"| QUOTE
+    WKR -->|"Call provider"| FX
+    WKR -->|"Call provider"| GITHUB
+
     API -->|"Progress request"| RMQ
     RMQ -->|"Progress reply (correlation_id)"| API
     WKR -->|"Status/progress"| REDIS
     WKR -->|"Final results"| MONGO
-    WKR --> WEATHER
-    WKR --> QUOTE
-    WKR --> FX
-    WKR --> GITHUB
 
     PROM -->|"Scrape /metrics"| API
     PROM -->|"Scrape /metrics"| WKR

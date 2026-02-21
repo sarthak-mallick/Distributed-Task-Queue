@@ -124,6 +124,9 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
   - `kubectl kustomize infra/aks/monitoring` passed
   - `ACR_LOGIN_SERVER=example.azurecr.io IMAGE_TAG=day20-check DRY_RUN=true K8S_NAMESPACE=dtq bash infra/aks/scripts/deploy-release.sh` passed
   - `bash scripts/run-current-e2e.sh --with-ui-checks --purge` passed (run id `20260220232828`)
+- 2026-02-20: Added consolidated operator runbook `docs/system-runbook.md` with fresh-system setup, local/cloud execution steps, and sample GraphQL/gRPC payloads; linked from `README.md`.
+- 2026-02-21: Split operator docs into dedicated runbooks (`docs/runbooks/local-runbook.md`, `docs/runbooks/local-validation-runbook.md`, `docs/runbooks/azure-runbook.md`) and de-duplicated run instructions in `README.md`/`docs/system-runbook.md`.
+- 2026-02-21: Removed `docs/system-runbook.md`; `README.md` is now the sole top-level runbook index pointing to the three dedicated runbooks.
 
 ## Handoff Snapshot
 

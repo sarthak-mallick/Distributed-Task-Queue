@@ -118,7 +118,18 @@ sequenceDiagram
     API-->>UI: Current status/progress
 ```
 
-## Current Runbook (Completed Through Week 4 Day 20)
+### Workflow Explanation
+
+When a user submits a job from the React UI, the API accepts the request and returns a `job_id` immediately so the UI can start tracking progress.  
+The API publishes the job to Kafka, which decouples request handling from worker execution and keeps submission responsive under load.  
+Workers consume jobs asynchronously, execute the external provider call, and update Redis with milestone progress states during processing.  
+Redis acts as the fast source of truth for current status, so progress checks can be served quickly without scanning durable storage.  
+Once processing finishes, the worker persists the final result and metadata in MongoDB for durable retrieval and auditing.  
+In parallel, the UI receives live updates through GraphQL subscriptions pushed from the API as job state changes occur.  
+If a user explicitly asks for current progress, the API uses RabbitMQ request-reply to fetch correlated status data reliably.  
+This split design lets Kafka handle high-throughput job ingestion while RabbitMQ handles interactive, correlation-sensitive progress lookups.
+
+## Runbooks
 Runbooks are split by use case to avoid duplicated instructions:
 Use the split runbooks:
 - Local app run: `docs/runbooks/local-runbook.md`

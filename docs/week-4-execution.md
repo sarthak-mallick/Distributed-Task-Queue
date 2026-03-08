@@ -127,6 +127,9 @@ Complete Week 4 monitoring, hardening, and runbook polish with a Day 17-first se
 - 2026-02-20: Added consolidated operator runbook `docs/system-runbook.md` with fresh-system setup, local/cloud execution steps, and sample GraphQL/gRPC payloads; linked from `README.md`.
 - 2026-02-21: Split operator docs into dedicated runbooks (`docs/runbooks/local-runbook.md`, `docs/runbooks/local-validation-runbook.md`, `docs/runbooks/azure-runbook.md`) and de-duplicated run instructions in `README.md`/`docs/system-runbook.md`.
 - 2026-02-21: Removed `docs/system-runbook.md`; `README.md` is now the sole top-level runbook index pointing to the three dedicated runbooks.
+- 2026-02-25: Captured UI workflow demo artifacts (submit -> status/progress -> completed) under `.tmp/ui-capture/media/` for thread handoff evidence.
+- 2026-02-25: Ran local benchmark (2 worker instances, 2-partition benchmark topic, mock weather provider): 120/120 jobs completed in 5.547s (~1298 jobs/min), p95 GraphQL status lookup latency ~1.42ms, failed-job rate 0%.
+- 2026-02-26: Completed worker scaling sweep (1/2/4/8 workers with matching partitions, 240 jobs/scenario, mock weather provider): best throughput at 2 workers (~2593 jobs/min), all scenarios 0% failures, p95 status latency ranged ~1.22ms (1 worker) to ~3.25ms (8 workers).
 
 ## Handoff Snapshot
 

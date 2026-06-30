@@ -728,12 +728,14 @@ func (a *app) writeQueuedStatus(ctx context.Context, jobID, traceID string, at t
 		"message":          "job queued",
 	}
 
-	if err := a.redisClient.HSet(ctx, key, values).Err(); err != nil {
-		a.logger.Printf("redis HSET failed key=%s err=%v", key, err)
-		return err
-	}
-	if err := a.redisClient.Expire(ctx, key, a.cfg.statusTTL).Err(); err != nil {
-		a.logger.Printf("redis EXPIRE failed key=%s ttl=%s err=%v", key, a.cfg.statusTTL, err)
+	// HSET and EXPIRE must apply atomically; a partial write (HSET without EXPIRE) would
+	// leave the status hash persisted with no TTL and leak Redis memory. TxPipeline wraps
+	// both commands in MULTI/EXEC so they either both apply or neither does.
+	pipe := a.redisClient.TxPipeline()
+	pipe.HSet(ctx, key, values)
+	pipe.Expire(ctx, key, a.cfg.statusTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		a.logger.Printf("redis queued status write failed key=%s ttl=%s err=%v", key, a.cfg.statusTTL, err)
 		return err
 	}
 
@@ -757,12 +759,12 @@ func (a *app) writeFailedEnqueueStatus(ctx context.Context, jobID, traceID strin
 		"error_code":       "KAFKA_PUBLISH_FAILED",
 	}
 
-	if err := a.redisClient.HSet(ctx, key, values).Err(); err != nil {
-		a.logger.Printf("redis failed-status HSET failed key=%s err=%v", key, err)
-		return err
-	}
-	if err := a.redisClient.Expire(ctx, key, a.cfg.statusTTL).Err(); err != nil {
-		a.logger.Printf("redis failed-status EXPIRE failed key=%s ttl=%s err=%v", key, a.cfg.statusTTL, err)
+	// Apply HSET and EXPIRE atomically so a partial write can never leave a TTL-less key.
+	pipe := a.redisClient.TxPipeline()
+	pipe.HSet(ctx, key, values)
+	pipe.Expire(ctx, key, a.cfg.statusTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		a.logger.Printf("redis failed-status write failed key=%s ttl=%s err=%v", key, a.cfg.statusTTL, err)
 		return err
 	}
 

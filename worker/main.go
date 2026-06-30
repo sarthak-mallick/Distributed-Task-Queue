@@ -1400,6 +1400,7 @@ func (w *worker) upsertStatusWithRetry(ctx context.Context, record jobStatusReco
 		w.cfg.statusWriteMaxAttempts,
 		w.cfg.statusWriteInitialBackoff,
 		w.cfg.statusWriteMaxBackoff,
+		isRetryableWorkerStoreError,
 		func(attempt int, err error, retryIn time.Duration) {
 			if w.metrics != nil {
 				w.metrics.recordStatusWriteRetry()
@@ -1448,6 +1449,7 @@ func (w *worker) upsertJobResultWithRetry(ctx context.Context, job kafkaJobMessa
 		w.cfg.resultWriteMaxAttempts,
 		w.cfg.resultWriteInitialBackoff,
 		w.cfg.resultWriteMaxBackoff,
+		isRetryableWorkerStoreError,
 		func(attempt int, err error, retryIn time.Duration) {
 			if w.metrics != nil {
 				w.metrics.recordResultWriteRetry()
@@ -1494,12 +1496,16 @@ func (w *worker) retryOperation(
 	maxAttempts int,
 	initialBackoff time.Duration,
 	maxBackoff time.Duration,
+	isRetryable func(error) bool,
 	onRetry func(attempt int, err error, retryIn time.Duration),
 	onFailure func(attempts int, err error),
 	op func() error,
 ) error {
 	if maxAttempts < 1 {
 		maxAttempts = 1
+	}
+	if isRetryable == nil {
+		isRetryable = isRetryableWorkerStoreError
 	}
 
 	var lastErr error
@@ -1514,7 +1520,7 @@ func (w *worker) retryOperation(
 		}
 		lastErr = err
 
-		if !isRetryableWorkerStoreError(err) || attempt >= maxAttempts {
+		if !isRetryable(err) || attempt >= maxAttempts {
 			break
 		}
 
@@ -1623,75 +1629,44 @@ func (w *worker) fetchWeatherWithRetry(ctx context.Context, job kafkaJobMessage,
 		return weatherObservation{}, errors.New("weather client is not configured")
 	}
 
-	maxAttempts := w.cfg.weatherMaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-
-	var lastErr error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		obs, err := w.weather.Fetch(ctx, payload)
-		if err == nil {
-			if attempt > 1 {
-				w.logger.Printf(
-					"weather provider recovered job_id=%s trace_id=%s city=%s attempt=%d/%d",
-					job.JobID,
-					job.TraceID,
-					payload.City,
-					attempt,
-					maxAttempts,
-				)
-			}
-			return obs, nil
-		}
-
-		lastErr = err
-		if !isRetryableWeatherError(err) {
+	var obs weatherObservation
+	err := w.retryOperation(
+		ctx,
+		w.cfg.weatherMaxAttempts,
+		w.cfg.weatherRetryInitialBO,
+		w.cfg.weatherRetryMaxBO,
+		isRetryableWeatherError,
+		func(attempt int, err error, retryIn time.Duration) {
 			w.logger.Printf(
-				"weather provider non-retryable failure job_id=%s trace_id=%s city=%s attempt=%d/%d err=%v",
+				"weather provider transient failure job_id=%s trace_id=%s city=%s attempt=%d retry_in=%s err=%v",
 				job.JobID,
 				job.TraceID,
 				payload.City,
 				attempt,
-				maxAttempts,
+				retryIn,
 				err,
 			)
-			return weatherObservation{}, err
-		}
-		if attempt >= maxAttempts {
-			break
-		}
-
-		backoff := calculateRetryBackoff(w.cfg.weatherRetryInitialBO, w.cfg.weatherRetryMaxBO, attempt)
-		w.logger.Printf(
-			"weather provider transient failure job_id=%s trace_id=%s city=%s attempt=%d/%d retry_in=%s err=%v",
-			job.JobID,
-			job.TraceID,
-			payload.City,
-			attempt,
-			maxAttempts,
-			backoff,
-			err,
-		)
-
-		if err := sleepWithContext(ctx, backoff); err != nil {
-			return weatherObservation{}, err
-		}
-	}
-
-	if lastErr == nil {
-		lastErr = errors.New("weather provider failed with unknown error")
-	}
-	w.logger.Printf(
-		"weather provider exhausted retries job_id=%s trace_id=%s city=%s attempts=%d err=%v",
-		job.JobID,
-		job.TraceID,
-		payload.City,
-		maxAttempts,
-		lastErr,
+		},
+		func(attempts int, err error) {
+			w.logger.Printf(
+				"weather provider failed job_id=%s trace_id=%s city=%s attempts=%d err=%v",
+				job.JobID,
+				job.TraceID,
+				payload.City,
+				attempts,
+				err,
+			)
+		},
+		func() error {
+			var fetchErr error
+			obs, fetchErr = w.weather.Fetch(ctx, payload)
+			return fetchErr
+		},
 	)
-	return weatherObservation{}, lastErr
+	if err != nil {
+		return weatherObservation{}, err
+	}
+	return obs, nil
 }
 
 // isRetryableWeatherError classifies provider errors that should trigger retry/backoff.

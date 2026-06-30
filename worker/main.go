@@ -1781,7 +1781,14 @@ func (c *fallbackWeatherClient) Fetch(ctx context.Context, payload weatherPayloa
 	if err == nil {
 		return obs, nil
 	}
-	c.logger.Printf("primary weather provider failed city=%s err=%v; using mock fallback", payload.City, err)
+	// Only mask transient failures with the mock. Non-retryable errors (e.g. an unknown
+	// city) are real and must propagate, otherwise the job completes with fabricated
+	// weather for input that the provider rejected.
+	if !isRetryableWeatherError(err) {
+		c.logger.Printf("primary weather provider non-retryable failure city=%s err=%v; not using fallback", payload.City, err)
+		return weatherObservation{}, err
+	}
+	c.logger.Printf("primary weather provider transient failure city=%s err=%v; using mock fallback", payload.City, err)
 	return c.fallback.Fetch(ctx, payload)
 }
 

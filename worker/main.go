@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -681,21 +682,29 @@ func (w *worker) run(ctx context.Context) error {
 	fetchCtx, cancelFetch := context.WithCancel(context.Background())
 	defer cancelFetch()
 
-	if err := w.startMetricsServer(serviceCtx); err != nil {
+	metricsDone, err := w.startMetricsServer(serviceCtx)
+	if err != nil {
 		return err
 	}
 
-	if err := w.startGRPCServer(serviceCtx); err != nil {
+	grpcDone, err := w.startGRPCServer(serviceCtx)
+	if err != nil {
 		return err
 	}
 
+	// progressDone is closed once the progress responder goroutine has fully exited.
+	// run() waits on it before returning so the deferred close() never reads or closes
+	// w.rabbitChan while reopenProgressChannel is mutating it (data race + double close).
+	progressDone := make(chan struct{})
 	if w.rabbitConn != nil {
 		go func() {
+			defer close(progressDone)
 			if err := w.runProgressResponder(serviceCtx); err != nil && serviceCtx.Err() == nil {
 				w.logger.Printf("progress responder stopped with error: %v", err)
 			}
 		}()
 	} else {
+		close(progressDone)
 		w.logger.Println("progress responder disabled: rabbitmq connection is not configured")
 	}
 
@@ -707,6 +716,7 @@ func (w *worker) run(ctx context.Context) error {
 	select {
 	case err := <-kafkaDone:
 		cancelServices()
+		w.awaitServiceShutdown(progressDone, grpcDone, metricsDone)
 		return err
 	case <-ctx.Done():
 		inFlight := int64(0)
@@ -718,7 +728,28 @@ func (w *worker) run(ctx context.Context) error {
 		cancelFetch()
 		err := w.waitForKafkaLoopDrain(kafkaDone, w.cfg.shutdownDrainTimeout)
 		cancelServices()
+		w.awaitServiceShutdown(progressDone, grpcDone, metricsDone)
 		return err
+	}
+}
+
+// awaitServiceShutdown blocks until every background service goroutine has fully stopped,
+// bounded by a single shutdown drain budget. Waiting here guarantees those goroutines never
+// touch shared state (w.rabbitChan) or log after run() returns, which would otherwise be a
+// data race against the deferred close() and the test logger.
+func (w *worker) awaitServiceShutdown(dones ...<-chan struct{}) {
+	timer := time.NewTimer(w.cfg.shutdownDrainTimeout)
+	defer timer.Stop()
+	for _, done := range dones {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-timer.C:
+			w.logger.Println("background services did not stop within drain timeout")
+			return
+		}
 	}
 }
 
@@ -748,17 +779,22 @@ func (w *worker) waitForKafkaLoopDrain(kafkaDone <-chan error, timeout time.Dura
 }
 
 // startGRPCServer starts worker's gRPC status service and shuts it down on context cancel.
-func (w *worker) startGRPCServer(ctx context.Context) error {
+// The returned channel is closed once both the serve and shutdown goroutines have exited, so
+// run() can wait for them before returning and they never log after the process/test moves on.
+func (w *worker) startGRPCServer(ctx context.Context) (<-chan struct{}, error) {
 	if w.grpcServer == nil {
-		return errors.New("grpc server is not configured")
+		return nil, errors.New("grpc server is not configured")
 	}
 
 	listener, err := net.Listen("tcp", w.cfg.grpcListenAddr)
 	if err != nil {
-		return fmt.Errorf("grpc listen failed addr=%s: %w", w.cfg.grpcListenAddr, err)
+		return nil, fmt.Errorf("grpc listen failed addr=%s: %w", w.cfg.grpcListenAddr, err)
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		w.logger.Println("grpc server shutdown requested")
 		w.grpcServer.GracefulStop()
@@ -766,23 +802,31 @@ func (w *worker) startGRPCServer(ctx context.Context) error {
 	}()
 
 	go func() {
+		defer wg.Done()
 		w.logger.Printf("grpc server listening addr=%s", w.cfg.grpcListenAddr)
 		if err := w.grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			w.logger.Printf("grpc server stopped with error: %v", err)
 		}
 	}()
-	return nil
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, nil
 }
 
 // startMetricsServer starts worker's Prometheus metrics endpoint and shuts it down on cancel.
-func (w *worker) startMetricsServer(ctx context.Context) error {
+// The returned channel is closed once its goroutines have exited (see startGRPCServer).
+func (w *worker) startMetricsServer(ctx context.Context) (<-chan struct{}, error) {
 	if w.metrics == nil {
-		return errors.New("worker metrics registry is not configured")
+		return nil, errors.New("worker metrics registry is not configured")
 	}
 
 	listener, err := net.Listen("tcp", w.cfg.metricsListenAddr)
 	if err != nil {
-		return fmt.Errorf("metrics listen failed addr=%s: %w", w.cfg.metricsListenAddr, err)
+		return nil, fmt.Errorf("metrics listen failed addr=%s: %w", w.cfg.metricsListenAddr, err)
 	}
 
 	mux := http.NewServeMux()
@@ -794,7 +838,10 @@ func (w *worker) startMetricsServer(ctx context.Context) error {
 	}
 	w.metricsHTTP = metricsServer
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		w.metrics.recordGracefulShutdownRequest()
 		w.logger.Println("metrics server shutdown requested")
@@ -807,13 +854,19 @@ func (w *worker) startMetricsServer(ctx context.Context) error {
 	}()
 
 	go func() {
+		defer wg.Done()
 		w.logger.Printf("metrics server listening addr=%s", w.cfg.metricsListenAddr)
 		if err := metricsServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			w.logger.Printf("metrics server stopped with error: %v", err)
 		}
 	}()
 
-	return nil
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, nil
 }
 
 // handleMetrics serves worker Prometheus metrics for monitoring scrapes.
@@ -1227,6 +1280,9 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		return w.commitMessage(msg, "drop-unsupported-job-type")
 	}
 
+	// Intentionally derived from context.Background() rather than the loop ctx: on shutdown,
+	// cancelFetch() stops fetching new messages but the in-flight job must be allowed to finish
+	// within waitForKafkaLoopDrain so its result is committed (graceful drain).
 	processCtx, cancel := context.WithTimeout(context.Background(), w.cfg.processTimeout)
 	defer cancel()
 

@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,6 +65,7 @@ type config struct {
 	progressConsumerTag      string
 	progressConsumerPrefetch int
 	progressReconnectBackoff time.Duration
+	progressRequeueBackoff   time.Duration
 	grpcListenAddr           string
 	metricsListenAddr        string
 	grpcPollInterval         time.Duration
@@ -328,6 +330,11 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	progressRequeueBackoff, err := parseDurationEnv("RABBITMQ_PROGRESS_REQUEUE_BACKOFF", 500*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
 	grpcPollInterval, err := parseDurationEnv("WORKER_GRPC_POLL_INTERVAL", 750*time.Millisecond)
 	if err != nil {
 		return config{}, err
@@ -434,6 +441,7 @@ func loadConfig() (config, error) {
 		progressConsumerTag:      envOrDefault("RABBITMQ_PROGRESS_CONSUMER_TAG", "dtq-worker-progress-v1"),
 		progressConsumerPrefetch: progressConsumerPrefetch,
 		progressReconnectBackoff: progressReconnectBackoff,
+		progressRequeueBackoff:   progressRequeueBackoff,
 		grpcListenAddr:           envOrDefault("WORKER_GRPC_ADDR", ":9090"),
 		metricsListenAddr:        envOrDefault("WORKER_METRICS_ADDR", ":2112"),
 		grpcPollInterval:         grpcPollInterval,
@@ -674,21 +682,29 @@ func (w *worker) run(ctx context.Context) error {
 	fetchCtx, cancelFetch := context.WithCancel(context.Background())
 	defer cancelFetch()
 
-	if err := w.startMetricsServer(serviceCtx); err != nil {
+	metricsDone, err := w.startMetricsServer(serviceCtx)
+	if err != nil {
 		return err
 	}
 
-	if err := w.startGRPCServer(serviceCtx); err != nil {
+	grpcDone, err := w.startGRPCServer(serviceCtx)
+	if err != nil {
 		return err
 	}
 
+	// progressDone is closed once the progress responder goroutine has fully exited.
+	// run() waits on it before returning so the deferred close() never reads or closes
+	// w.rabbitChan while reopenProgressChannel is mutating it (data race + double close).
+	progressDone := make(chan struct{})
 	if w.rabbitConn != nil {
 		go func() {
+			defer close(progressDone)
 			if err := w.runProgressResponder(serviceCtx); err != nil && serviceCtx.Err() == nil {
 				w.logger.Printf("progress responder stopped with error: %v", err)
 			}
 		}()
 	} else {
+		close(progressDone)
 		w.logger.Println("progress responder disabled: rabbitmq connection is not configured")
 	}
 
@@ -700,6 +716,7 @@ func (w *worker) run(ctx context.Context) error {
 	select {
 	case err := <-kafkaDone:
 		cancelServices()
+		w.awaitServiceShutdown(progressDone, grpcDone, metricsDone)
 		return err
 	case <-ctx.Done():
 		inFlight := int64(0)
@@ -711,7 +728,28 @@ func (w *worker) run(ctx context.Context) error {
 		cancelFetch()
 		err := w.waitForKafkaLoopDrain(kafkaDone, w.cfg.shutdownDrainTimeout)
 		cancelServices()
+		w.awaitServiceShutdown(progressDone, grpcDone, metricsDone)
 		return err
+	}
+}
+
+// awaitServiceShutdown blocks until every background service goroutine has fully stopped,
+// bounded by a single shutdown drain budget. Waiting here guarantees those goroutines never
+// touch shared state (w.rabbitChan) or log after run() returns, which would otherwise be a
+// data race against the deferred close() and the test logger.
+func (w *worker) awaitServiceShutdown(dones ...<-chan struct{}) {
+	timer := time.NewTimer(w.cfg.shutdownDrainTimeout)
+	defer timer.Stop()
+	for _, done := range dones {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-timer.C:
+			w.logger.Println("background services did not stop within drain timeout")
+			return
+		}
 	}
 }
 
@@ -741,17 +779,22 @@ func (w *worker) waitForKafkaLoopDrain(kafkaDone <-chan error, timeout time.Dura
 }
 
 // startGRPCServer starts worker's gRPC status service and shuts it down on context cancel.
-func (w *worker) startGRPCServer(ctx context.Context) error {
+// The returned channel is closed once both the serve and shutdown goroutines have exited, so
+// run() can wait for them before returning and they never log after the process/test moves on.
+func (w *worker) startGRPCServer(ctx context.Context) (<-chan struct{}, error) {
 	if w.grpcServer == nil {
-		return errors.New("grpc server is not configured")
+		return nil, errors.New("grpc server is not configured")
 	}
 
 	listener, err := net.Listen("tcp", w.cfg.grpcListenAddr)
 	if err != nil {
-		return fmt.Errorf("grpc listen failed addr=%s: %w", w.cfg.grpcListenAddr, err)
+		return nil, fmt.Errorf("grpc listen failed addr=%s: %w", w.cfg.grpcListenAddr, err)
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		w.logger.Println("grpc server shutdown requested")
 		w.grpcServer.GracefulStop()
@@ -759,23 +802,31 @@ func (w *worker) startGRPCServer(ctx context.Context) error {
 	}()
 
 	go func() {
+		defer wg.Done()
 		w.logger.Printf("grpc server listening addr=%s", w.cfg.grpcListenAddr)
 		if err := w.grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			w.logger.Printf("grpc server stopped with error: %v", err)
 		}
 	}()
-	return nil
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, nil
 }
 
 // startMetricsServer starts worker's Prometheus metrics endpoint and shuts it down on cancel.
-func (w *worker) startMetricsServer(ctx context.Context) error {
+// The returned channel is closed once its goroutines have exited (see startGRPCServer).
+func (w *worker) startMetricsServer(ctx context.Context) (<-chan struct{}, error) {
 	if w.metrics == nil {
-		return errors.New("worker metrics registry is not configured")
+		return nil, errors.New("worker metrics registry is not configured")
 	}
 
 	listener, err := net.Listen("tcp", w.cfg.metricsListenAddr)
 	if err != nil {
-		return fmt.Errorf("metrics listen failed addr=%s: %w", w.cfg.metricsListenAddr, err)
+		return nil, fmt.Errorf("metrics listen failed addr=%s: %w", w.cfg.metricsListenAddr, err)
 	}
 
 	mux := http.NewServeMux()
@@ -787,7 +838,10 @@ func (w *worker) startMetricsServer(ctx context.Context) error {
 	}
 	w.metricsHTTP = metricsServer
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-ctx.Done()
 		w.metrics.recordGracefulShutdownRequest()
 		w.logger.Println("metrics server shutdown requested")
@@ -800,13 +854,19 @@ func (w *worker) startMetricsServer(ctx context.Context) error {
 	}()
 
 	go func() {
+		defer wg.Done()
 		w.logger.Printf("metrics server listening addr=%s", w.cfg.metricsListenAddr)
 		if err := metricsServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			w.logger.Printf("metrics server stopped with error: %v", err)
 		}
 	}()
 
-	return nil
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done, nil
 }
 
 // handleMetrics serves worker Prometheus metrics for monitoring scrapes.
@@ -924,6 +984,14 @@ func (w *worker) runProgressResponderSession(ctx context.Context) error {
 
 			if err := d.Nack(false, requeue); err != nil {
 				w.logger.Printf("progress request nack failed delivery_tag=%d requeue=%t err=%v", d.DeliveryTag, requeue, err)
+			}
+
+			// Back off before the broker can redeliver a requeued message, otherwise a
+			// transient dependency failure (e.g. Redis) turns into a tight redelivery storm.
+			if requeue {
+				if err := sleepWithContext(ctx, w.cfg.progressRequeueBackoff); err != nil {
+					return nil
+				}
 			}
 		}
 	}
@@ -1212,6 +1280,9 @@ func (w *worker) processFetchedMessage(ctx context.Context, msg kafka.Message) e
 		return w.commitMessage(msg, "drop-unsupported-job-type")
 	}
 
+	// Intentionally derived from context.Background() rather than the loop ctx: on shutdown,
+	// cancelFetch() stops fetching new messages but the in-flight job must be allowed to finish
+	// within waitForKafkaLoopDrain so its result is committed (graceful drain).
 	processCtx, cancel := context.WithTimeout(context.Background(), w.cfg.processTimeout)
 	defer cancel()
 
@@ -1329,6 +1400,7 @@ func (w *worker) upsertStatusWithRetry(ctx context.Context, record jobStatusReco
 		w.cfg.statusWriteMaxAttempts,
 		w.cfg.statusWriteInitialBackoff,
 		w.cfg.statusWriteMaxBackoff,
+		isRetryableWorkerStoreError,
 		func(attempt int, err error, retryIn time.Duration) {
 			if w.metrics != nil {
 				w.metrics.recordStatusWriteRetry()
@@ -1377,6 +1449,7 @@ func (w *worker) upsertJobResultWithRetry(ctx context.Context, job kafkaJobMessa
 		w.cfg.resultWriteMaxAttempts,
 		w.cfg.resultWriteInitialBackoff,
 		w.cfg.resultWriteMaxBackoff,
+		isRetryableWorkerStoreError,
 		func(attempt int, err error, retryIn time.Duration) {
 			if w.metrics != nil {
 				w.metrics.recordResultWriteRetry()
@@ -1423,12 +1496,16 @@ func (w *worker) retryOperation(
 	maxAttempts int,
 	initialBackoff time.Duration,
 	maxBackoff time.Duration,
+	isRetryable func(error) bool,
 	onRetry func(attempt int, err error, retryIn time.Duration),
 	onFailure func(attempts int, err error),
 	op func() error,
 ) error {
 	if maxAttempts < 1 {
 		maxAttempts = 1
+	}
+	if isRetryable == nil {
+		isRetryable = isRetryableWorkerStoreError
 	}
 
 	var lastErr error
@@ -1443,7 +1520,7 @@ func (w *worker) retryOperation(
 		}
 		lastErr = err
 
-		if !isRetryableWorkerStoreError(err) || attempt >= maxAttempts {
+		if !isRetryable(err) || attempt >= maxAttempts {
 			break
 		}
 
@@ -1552,75 +1629,44 @@ func (w *worker) fetchWeatherWithRetry(ctx context.Context, job kafkaJobMessage,
 		return weatherObservation{}, errors.New("weather client is not configured")
 	}
 
-	maxAttempts := w.cfg.weatherMaxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-
-	var lastErr error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		obs, err := w.weather.Fetch(ctx, payload)
-		if err == nil {
-			if attempt > 1 {
-				w.logger.Printf(
-					"weather provider recovered job_id=%s trace_id=%s city=%s attempt=%d/%d",
-					job.JobID,
-					job.TraceID,
-					payload.City,
-					attempt,
-					maxAttempts,
-				)
-			}
-			return obs, nil
-		}
-
-		lastErr = err
-		if !isRetryableWeatherError(err) {
+	var obs weatherObservation
+	err := w.retryOperation(
+		ctx,
+		w.cfg.weatherMaxAttempts,
+		w.cfg.weatherRetryInitialBO,
+		w.cfg.weatherRetryMaxBO,
+		isRetryableWeatherError,
+		func(attempt int, err error, retryIn time.Duration) {
 			w.logger.Printf(
-				"weather provider non-retryable failure job_id=%s trace_id=%s city=%s attempt=%d/%d err=%v",
+				"weather provider transient failure job_id=%s trace_id=%s city=%s attempt=%d retry_in=%s err=%v",
 				job.JobID,
 				job.TraceID,
 				payload.City,
 				attempt,
-				maxAttempts,
+				retryIn,
 				err,
 			)
-			return weatherObservation{}, err
-		}
-		if attempt >= maxAttempts {
-			break
-		}
-
-		backoff := calculateRetryBackoff(w.cfg.weatherRetryInitialBO, w.cfg.weatherRetryMaxBO, attempt)
-		w.logger.Printf(
-			"weather provider transient failure job_id=%s trace_id=%s city=%s attempt=%d/%d retry_in=%s err=%v",
-			job.JobID,
-			job.TraceID,
-			payload.City,
-			attempt,
-			maxAttempts,
-			backoff,
-			err,
-		)
-
-		if err := sleepWithContext(ctx, backoff); err != nil {
-			return weatherObservation{}, err
-		}
-	}
-
-	if lastErr == nil {
-		lastErr = errors.New("weather provider failed with unknown error")
-	}
-	w.logger.Printf(
-		"weather provider exhausted retries job_id=%s trace_id=%s city=%s attempts=%d err=%v",
-		job.JobID,
-		job.TraceID,
-		payload.City,
-		maxAttempts,
-		lastErr,
+		},
+		func(attempts int, err error) {
+			w.logger.Printf(
+				"weather provider failed job_id=%s trace_id=%s city=%s attempts=%d err=%v",
+				job.JobID,
+				job.TraceID,
+				payload.City,
+				attempts,
+				err,
+			)
+		},
+		func() error {
+			var fetchErr error
+			obs, fetchErr = w.weather.Fetch(ctx, payload)
+			return fetchErr
+		},
 	)
-	return weatherObservation{}, lastErr
+	if err != nil {
+		return weatherObservation{}, err
+	}
+	return obs, nil
 }
 
 // isRetryableWeatherError classifies provider errors that should trigger retry/backoff.
@@ -1781,7 +1827,14 @@ func (c *fallbackWeatherClient) Fetch(ctx context.Context, payload weatherPayloa
 	if err == nil {
 		return obs, nil
 	}
-	c.logger.Printf("primary weather provider failed city=%s err=%v; using mock fallback", payload.City, err)
+	// Only mask transient failures with the mock. Non-retryable errors (e.g. an unknown
+	// city) are real and must propagate, otherwise the job completes with fabricated
+	// weather for input that the provider rejected.
+	if !isRetryableWeatherError(err) {
+		c.logger.Printf("primary weather provider non-retryable failure city=%s err=%v; not using fallback", payload.City, err)
+		return weatherObservation{}, err
+	}
+	c.logger.Printf("primary weather provider transient failure city=%s err=%v; using mock fallback", payload.City, err)
 	return c.fallback.Fetch(ctx, payload)
 }
 

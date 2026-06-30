@@ -153,7 +153,16 @@ export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:8080");
   const resolvedApiUrl = useMemo(() => normalizeApiBaseUrl(apiBaseUrl), [apiBaseUrl]);
 
-  const apolloBundle = useMemo(() => createApolloBundle(resolvedApiUrl), [resolvedApiUrl]);
+  // Debounce the URL that actually drives the Apollo client/WebSocket. Without this, every
+  // keystroke in the API base URL field rebuilds the client and disposes the old one, tearing
+  // down any in-flight subscription and thrashing WebSocket reconnects.
+  const [activeApiUrl, setActiveApiUrl] = useState(resolvedApiUrl);
+  useEffect(() => {
+    const handle = setTimeout(() => setActiveApiUrl(resolvedApiUrl), 400);
+    return () => clearTimeout(handle);
+  }, [resolvedApiUrl]);
+
+  const apolloBundle = useMemo(() => createApolloBundle(activeApiUrl), [activeApiUrl]);
 
   useEffect(
     () => () => {
@@ -199,11 +208,14 @@ function GraphQLConsole({ apiBaseUrl, onApiBaseUrlChange, resolvedApiUrl }) {
   });
 
   useEffect(() => {
-    if (subscriptionData?.jobProgress) {
+    const progress = subscriptionData?.jobProgress;
+    // Ignore late/buffered frames that belong to a previously tracked job; without this guard
+    // a stale event can overwrite the status of the job currently selected for tracking.
+    if (progress && progress.jobId === liveJobId) {
       setStatusError("");
-      setStatusResponse(subscriptionData.jobProgress);
+      setStatusResponse(progress);
     }
-  }, [subscriptionData]);
+  }, [subscriptionData, liveJobId]);
 
   useEffect(() => {
     if (subscriptionError) {

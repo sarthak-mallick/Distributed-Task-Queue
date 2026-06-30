@@ -208,11 +208,14 @@ function GraphQLConsole({ apiBaseUrl, onApiBaseUrlChange, resolvedApiUrl }) {
   });
 
   useEffect(() => {
-    if (subscriptionData?.jobProgress) {
+    const progress = subscriptionData?.jobProgress;
+    // Ignore late/buffered frames that belong to a previously tracked job; without this guard
+    // a stale event can overwrite the status of the job currently selected for tracking.
+    if (progress && progress.jobId === liveJobId) {
       setStatusError("");
-      setStatusResponse(subscriptionData.jobProgress);
+      setStatusResponse(progress);
     }
-  }, [subscriptionData]);
+  }, [subscriptionData, liveJobId]);
 
   useEffect(() => {
     if (subscriptionError) {

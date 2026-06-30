@@ -29,13 +29,6 @@ import (
 // appLogger is the process-wide logger used for startup and helper-function logs.
 var appLogger = log.New(os.Stdout, "api ", log.LstdFlags|log.LUTC)
 
-var (
-	// errStatusRequestTimeout indicates no RabbitMQ status reply arrived before timeout.
-	errStatusRequestTimeout = errors.New("status request timed out")
-	// errStatusNotFound indicates the worker reported no status for the requested job.
-	errStatusNotFound = errors.New("job not found")
-)
-
 // config contains runtime settings loaded from environment variables.
 type config struct {
 	listenAddr           string
@@ -87,16 +80,6 @@ type submitWeatherRequest struct {
 	Units       string `json:"units"`
 }
 
-// submitJobResponse is returned when a job is accepted for processing.
-type submitJobResponse struct {
-	JobID       string `json:"job_id"`
-	TraceID     string `json:"trace_id"`
-	JobType     string `json:"job_type"`
-	State       string `json:"state"`
-	SubmittedAt string `json:"submitted_at"`
-	Message     string `json:"message"`
-}
-
 // errorResponse is the uniform JSON error envelope.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -110,13 +93,6 @@ type kafkaJobMessage struct {
 	SubmittedAt   string          `json:"submitted_at"`
 	TraceID       string          `json:"trace_id"`
 	Payload       json.RawMessage `json:"payload"`
-}
-
-// progressCheckRequest is the canonical RabbitMQ progress request payload.
-type progressCheckRequest struct {
-	JobID       string `json:"job_id"`
-	RequestID   string `json:"request_id"`
-	RequestedAt string `json:"requested_at"`
 }
 
 // progressCheckReply is the canonical RabbitMQ progress reply payload.
@@ -462,191 +438,6 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(w, apiMetricsState.renderPrometheus()); err != nil {
 		a.logger.Printf("metrics response write failed: %v", err)
 	}
-}
-
-// handleSubmitJob accepts generic job submissions.
-func (a *app) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
-	a.logger.Printf("submit job request method=%s path=%s", r.Method, r.URL.Path)
-	if r.Method != http.MethodPost {
-		a.logger.Printf("submit job rejected method=%s", r.Method)
-		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
-		return
-	}
-
-	var req submitJobRequest
-	if err := decodeJSON(r, &req); err != nil {
-		a.logger.Printf("submit job invalid request: %v", err)
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
-		return
-	}
-
-	req, err := validateSubmitJobRequest(req)
-	if err != nil {
-		a.logger.Printf("submit job validation failed: %v", err)
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
-		return
-	}
-
-	jobID, traceID, submittedAt, err := a.enqueueJob(r.Context(), req.JobType, req.Payload)
-	if err != nil {
-		a.logger.Printf("submit job enqueue failed job_type=%s err=%v", req.JobType, err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
-		return
-	}
-
-	w.Header().Set("Location", fmt.Sprintf("/v1/jobs/%s/status", jobID))
-	writeJSON(w, http.StatusAccepted, submitJobResponse{
-		JobID:       jobID,
-		TraceID:     traceID,
-		JobType:     req.JobType,
-		State:       "queued",
-		SubmittedAt: submittedAt.Format(time.RFC3339),
-		Message:     "job accepted",
-	})
-	a.logger.Printf("submit job accepted job_id=%s trace_id=%s job_type=%s", jobID, traceID, req.JobType)
-}
-
-// handleJobStatus fetches latest job state through RabbitMQ request-reply.
-func (a *app) handleJobStatus(w http.ResponseWriter, r *http.Request) {
-	a.logger.Printf("status request method=%s path=%s", r.Method, r.URL.Path)
-	if r.Method != http.MethodGet {
-		a.logger.Printf("status request rejected method=%s", r.Method)
-		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "method not allowed"})
-		return
-	}
-
-	jobID, err := parseJobStatusPath(r.URL.Path)
-	if err != nil {
-		a.logger.Printf("status request invalid path=%s err=%v", r.URL.Path, err)
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid status path"})
-		return
-	}
-	if _, err := uuid.Parse(jobID); err != nil {
-		a.logger.Printf("status request invalid job_id=%s err=%v", jobID, err)
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "job_id must be a valid UUID"})
-		return
-	}
-
-	reply, err := a.requestJobStatus(r.Context(), jobID)
-	if err != nil {
-		switch {
-		case errors.Is(err, errStatusNotFound):
-			a.logger.Printf("status request job not found job_id=%s", jobID)
-			writeJSON(w, http.StatusNotFound, reply)
-		case errors.Is(err, errStatusRequestTimeout):
-			a.logger.Printf("status request timeout job_id=%s", jobID)
-			writeJSON(w, http.StatusGatewayTimeout, errorResponse{Error: "status request timed out"})
-		default:
-			a.logger.Printf("status request failed job_id=%s err=%v", jobID, err)
-			writeJSON(w, http.StatusBadGateway, errorResponse{Error: "failed to fetch job status"})
-		}
-		return
-	}
-
-	writeJSON(w, http.StatusOK, reply)
-	a.logger.Printf("status request success job_id=%s state=%s progress=%d", reply.JobID, reply.State, reply.ProgressPercent)
-}
-
-// requestJobStatus sends a correlated RabbitMQ request and waits for the status reply.
-func (a *app) requestJobStatus(parentCtx context.Context, jobID string) (progressCheckReply, error) {
-	requestID := uuid.NewString()
-	requestedAt := time.Now().UTC()
-
-	body, err := json.Marshal(progressCheckRequest{
-		JobID:       jobID,
-		RequestID:   requestID,
-		RequestedAt: requestedAt.Format(time.RFC3339),
-	})
-	if err != nil {
-		return progressCheckReply{}, fmt.Errorf("request payload encode failed: %w", err)
-	}
-
-	ch, err := a.rabbitConn.Channel()
-	if err != nil {
-		return progressCheckReply{}, fmt.Errorf("rabbitmq channel open failed: %w", err)
-	}
-	defer func() {
-		if closeErr := ch.Close(); closeErr != nil {
-			a.logger.Printf("status request channel close failed: %v", closeErr)
-		}
-	}()
-
-	if _, err := ch.QueueDeclare(a.cfg.progressRequestQueue, true, false, false, false, nil); err != nil {
-		return progressCheckReply{}, fmt.Errorf("request queue declare failed: %w", err)
-	}
-
-	replyQueue, err := ch.QueueDeclare("", false, true, true, false, nil)
-	if err != nil {
-		return progressCheckReply{}, fmt.Errorf("reply queue declare failed: %w", err)
-	}
-
-	deliveries, err := ch.Consume(replyQueue.Name, "", true, true, false, false, nil)
-	if err != nil {
-		return progressCheckReply{}, fmt.Errorf("reply consumer setup failed: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(parentCtx, a.cfg.progressReplyTimeout)
-	defer cancel()
-
-	if err := ch.PublishWithContext(
-		ctx,
-		"",
-		a.cfg.progressRequestQueue,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType:   "application/json",
-			CorrelationId: requestID,
-			ReplyTo:       replyQueue.Name,
-			Body:          body,
-			Timestamp:     requestedAt,
-		},
-	); err != nil {
-		return progressCheckReply{}, fmt.Errorf("status request publish failed: %w", err)
-	}
-
-	a.logger.Printf("status request published job_id=%s request_id=%s", jobID, requestID)
-	for {
-		select {
-		case <-ctx.Done():
-			return progressCheckReply{}, errStatusRequestTimeout
-		case d, ok := <-deliveries:
-			if !ok {
-				return progressCheckReply{}, errors.New("reply consumer closed")
-			}
-			if strings.TrimSpace(d.CorrelationId) != requestID {
-				a.logger.Printf("ignoring mismatched correlation reply expected=%s got=%s", requestID, d.CorrelationId)
-				continue
-			}
-
-			var reply progressCheckReply
-			if err := decodeJSONBytes(d.Body, &reply); err != nil {
-				return progressCheckReply{}, fmt.Errorf("invalid status reply payload: %w", err)
-			}
-			if strings.TrimSpace(reply.Timestamp) == "" {
-				reply.Timestamp = time.Now().UTC().Format(time.RFC3339)
-			}
-			if reply.State == "not_found" {
-				return reply, errStatusNotFound
-			}
-			return reply, nil
-		}
-	}
-}
-
-// parseJobStatusPath extracts the {job_id} segment from /v1/jobs/{job_id}/status.
-func parseJobStatusPath(path string) (string, error) {
-	const prefix = "/v1/jobs/"
-	if !strings.HasPrefix(path, prefix) {
-		return "", errors.New("missing /v1/jobs prefix")
-	}
-
-	remainder := strings.TrimPrefix(path, prefix)
-	parts := strings.Split(remainder, "/")
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "status" {
-		return "", errors.New("path must match /v1/jobs/{job_id}/status")
-	}
-	return strings.TrimSpace(parts[0]), nil
 }
 
 // enqueueJob writes initial Redis status and publishes the canonical Kafka message.

@@ -386,6 +386,12 @@ func (s *graphQLSubscriptionSession) stopSubscription(id string) {
 
 // runProgressSubscription streams worker gRPC updates into graphql-transport-ws next frames.
 func (s *graphQLSubscriptionSession) runProgressSubscription(ctx context.Context, id, jobID string) {
+	if s.app.workerGRPC == nil {
+		s.writeError(id, "worker gRPC client is not configured")
+		_ = s.write(graphQLWSMessage{ID: id, Type: "complete"})
+		return
+	}
+
 	stream, err := s.app.workerGRPC.SubscribeJobProgress(ctx, &apiworkergrpc.SubscribeJobProgressRequest{
 		JobID:          jobID,
 		PollIntervalMS: int32(s.app.cfg.subscriptionPoll / time.Millisecond),

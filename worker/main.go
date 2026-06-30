@@ -64,6 +64,7 @@ type config struct {
 	progressConsumerTag      string
 	progressConsumerPrefetch int
 	progressReconnectBackoff time.Duration
+	progressRequeueBackoff   time.Duration
 	grpcListenAddr           string
 	metricsListenAddr        string
 	grpcPollInterval         time.Duration
@@ -328,6 +329,11 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	progressRequeueBackoff, err := parseDurationEnv("RABBITMQ_PROGRESS_REQUEUE_BACKOFF", 500*time.Millisecond)
+	if err != nil {
+		return config{}, err
+	}
+
 	grpcPollInterval, err := parseDurationEnv("WORKER_GRPC_POLL_INTERVAL", 750*time.Millisecond)
 	if err != nil {
 		return config{}, err
@@ -434,6 +440,7 @@ func loadConfig() (config, error) {
 		progressConsumerTag:      envOrDefault("RABBITMQ_PROGRESS_CONSUMER_TAG", "dtq-worker-progress-v1"),
 		progressConsumerPrefetch: progressConsumerPrefetch,
 		progressReconnectBackoff: progressReconnectBackoff,
+		progressRequeueBackoff:   progressRequeueBackoff,
 		grpcListenAddr:           envOrDefault("WORKER_GRPC_ADDR", ":9090"),
 		metricsListenAddr:        envOrDefault("WORKER_METRICS_ADDR", ":2112"),
 		grpcPollInterval:         grpcPollInterval,
@@ -924,6 +931,14 @@ func (w *worker) runProgressResponderSession(ctx context.Context) error {
 
 			if err := d.Nack(false, requeue); err != nil {
 				w.logger.Printf("progress request nack failed delivery_tag=%d requeue=%t err=%v", d.DeliveryTag, requeue, err)
+			}
+
+			// Back off before the broker can redeliver a requeued message, otherwise a
+			// transient dependency failure (e.g. Redis) turns into a tight redelivery storm.
+			if requeue {
+				if err := sleepWithContext(ctx, w.cfg.progressRequeueBackoff); err != nil {
+					return nil
+				}
 			}
 		}
 	}
